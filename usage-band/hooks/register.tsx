@@ -31,7 +31,7 @@ function colorFor(used: number): string {
 
 function bar(used: number): [string, string] {
   const left = Math.min(BAR, Math.max(0, Math.round(((100 - used) / 100) * BAR)))
-  return ['━'.repeat(left), '━'.repeat(BAR - left)]
+  return ['█'.repeat(left), '█'.repeat(BAR - left)]
 }
 
 function width(parts: string[]): number {
