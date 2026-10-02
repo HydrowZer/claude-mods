@@ -1,0 +1,9 @@
+{
+  "name": "usage-band",
+  "version": "0.1.0",
+  "description": "Bandeau au-dessus du prompt : coût de la session et utilisation restante",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "HydrowZer"
+  }
+}

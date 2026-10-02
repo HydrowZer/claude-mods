@@ -1,0 +1,11 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "HydrowZer" },
+  "plugins": [
+    {
+      "name": "usage-band",
+      "source": "./usage-band",
+      "description": "Bandeau au-dessus du prompt : coût de la session et utilisation restante (5 h / 7 j)"
+    }
+  ]
+}
