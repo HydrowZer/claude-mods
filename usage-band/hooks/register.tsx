@@ -85,21 +85,22 @@ export const register: Register = on => {
         bar: bar(used),
         value: `${String(left).replace('.', ',')} %`,
         rest: reset === null ? ' restant' : ` restant · reset ${reset}`,
+        short: reset === null ? '' : ` · ${reset}`,
         color: colorFor(used),
       }
     })
 
-    const rowWidth = (withBars: boolean) =>
+    const rowWidth = (isShort: boolean) =>
       width(cost ? [cost.label, cost.value] : []) +
       limits.reduce(
-        (n, l) => n + width([l.label, withBars ? `${l.bar.join('')} ` : '', l.value, l.rest]),
+        (n, l) => n + width([l.label, `${l.bar.join('')} `, l.value, isShort ? l.short : l.rest]),
         0,
       ) +
       GAP * (limits.length + (cost ? 1 : 0) - 1)
 
     const room = e.props.bodyColumns
-    const isRow = rowWidth(true) <= room || rowWidth(false) <= room
-    const withBars = rowWidth(true) <= room || !isRow
+    const isRow = rowWidth(true) <= room
+    const isShort = isRow && rowWidth(false) > room
 
     return (
       <Box flexDirection={isRow ? 'row' : 'column'} columnGap={GAP}>
@@ -112,10 +113,10 @@ export const register: Register = on => {
         {limits.map(l => (
           <Box key={l.key} flexDirection="row">
             <Text dimColor>{l.label}</Text>
-            {withBars && <Text color={l.color}>{l.bar[0]}</Text>}
-            {withBars && <Text dimColor>{`${l.bar[1]} `}</Text>}
+            <Text color={l.color}>{l.bar[0]}</Text>
+            <Text dimColor>{`${l.bar[1]} `}</Text>
             <Text bold color={l.color}>{l.value}</Text>
-            <Text dimColor wrap="truncate-end">{l.rest}</Text>
+            <Text dimColor wrap="truncate-end">{isShort ? l.short : l.rest}</Text>
           </Box>
         ))}
       </Box>
