@@ -11,7 +11,8 @@ const LABELS: Record<string, string> = {
   spend_limit: 'Plafond',
 }
 
-const BAR = 10
+const BAR = 8
+const GAP = 3
 
 function toUsage(limits: Limit[], cost: { usd: number } | undefined): Usage {
   return {
@@ -28,9 +29,13 @@ function colorFor(used: number): string {
   return used >= 90 ? 'red' : used >= 70 ? 'yellow' : 'green'
 }
 
-function bar(used: number): string {
-  const full = Math.min(BAR, Math.max(0, Math.round((used / 100) * BAR)))
-  return '█'.repeat(full) + '░'.repeat(BAR - full)
+function bar(used: number): [string, string] {
+  const left = Math.min(BAR, Math.max(0, Math.round(((100 - used) / 100) * BAR)))
+  return ['━'.repeat(left), '━'.repeat(BAR - left)]
+}
+
+function width(parts: string[]): number {
+  return parts.reduce((n, part) => n + [...part].length, 0)
 }
 
 function untilReset(resetsAt: string | undefined, now: number): string | null {
@@ -68,29 +73,51 @@ export const register: Register = on => {
     const { Box, Text } = $.ui.resolve(e)
     const now = await $.clock.now()
 
+    const cost = u.costUsd === null ? null : { label: 'Session ≈ ', value: money(u.costUsd) }
+    const limits = u.limits.map(limit => {
+      const used = limit.percentUsed
+      const left = Math.max(0, Math.round((100 - used) * 10) / 10)
+      const reset = untilReset(limit.resetsAt, now)
+
+      return {
+        key: limit.kind,
+        label: `${LABELS[limit.kind] ?? limit.kind} `,
+        bar: bar(used),
+        value: `${String(left).replace('.', ',')} %`,
+        rest: reset === null ? ' restant' : ` restant · reset ${reset}`,
+        color: colorFor(used),
+      }
+    })
+
+    const rowWidth = (withBars: boolean) =>
+      width(cost ? [cost.label, cost.value] : []) +
+      limits.reduce(
+        (n, l) => n + width([l.label, withBars ? `${l.bar.join('')} ` : '', l.value, l.rest]),
+        0,
+      ) +
+      GAP * (limits.length + (cost ? 1 : 0) - 1)
+
+    const room = e.props.bodyColumns
+    const isRow = rowWidth(true) <= room || rowWidth(false) <= room
+    const withBars = rowWidth(true) <= room || !isRow
+
     return (
-      <Box flexDirection="row" flexWrap="wrap" columnGap={3}>
-        {u.costUsd !== null && (
+      <Box flexDirection={isRow ? 'row' : 'column'} columnGap={GAP}>
+        {cost && (
           <Box flexDirection="row">
-            <Text dimColor>{'Session ≈ '}</Text>
-            <Text bold>{money(u.costUsd)}</Text>
+            <Text dimColor>{cost.label}</Text>
+            <Text bold>{cost.value}</Text>
           </Box>
         )}
-        {u.limits.map(limit => {
-          const used = limit.percentUsed
-          const left = Math.max(0, Math.round((100 - used) * 10) / 10)
-          const reset = untilReset(limit.resetsAt, now)
-
-          return (
-            <Box flexDirection="row">
-              <Text dimColor>{`${LABELS[limit.kind] ?? limit.kind} `}</Text>
-              <Text color={colorFor(used)}>{bar(used)}</Text>
-              <Text>{' reste '}</Text>
-              <Text bold color={colorFor(used)}>{`${String(left).replace('.', ',')} %`}</Text>
-              {reset !== null && <Text dimColor>{` · reset dans ${reset}`}</Text>}
-            </Box>
-          )
-        })}
+        {limits.map(l => (
+          <Box key={l.key} flexDirection="row">
+            <Text dimColor>{l.label}</Text>
+            {withBars && <Text color={l.color}>{l.bar[0]}</Text>}
+            {withBars && <Text dimColor>{`${l.bar[1]} `}</Text>}
+            <Text bold color={l.color}>{l.value}</Text>
+            <Text dimColor wrap="truncate-end">{l.rest}</Text>
+          </Box>
+        ))}
       </Box>
     )
   })
