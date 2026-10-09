@@ -56,6 +56,28 @@ export type Mascot = {
   pokeCount: number
 }
 
+export type CronJob = { id: string; cron: string; prompt: string; recurring: boolean }
+
+export type Wakeup = { at: number; reason: string | null; prompt: string | null }
+
+export type TaskItem = {
+  id: string
+  subject: string
+  activeForm: string | null
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
+export type Background = { type: string; description: string }
+
+export type Schedule = {
+  crons: CronJob[]
+  wakeup: Wakeup | null
+  /** Combien de fois chaque prompt programmé s'est déclenché. */
+  fires: { [prompt: string]: number }
+  tasks: TaskItem[]
+  background: Background[]
+}
+
 export type InfoKey =
   | 'modele'
   | 'projet'
@@ -69,9 +91,27 @@ export type InfoKey =
   | 'contexte'
   | 'limites'
   | 'reset'
+  | 'boucles'
+  | 'taches'
+  | 'arriereplan'
   | 'mascotte'
 
-export type Prefs = { isHidden: boolean; overrides: { [K in InfoKey]?: boolean } }
+/** Ce qu'on règle depuis le panneau ; absent, la valeur par défaut du code. */
+export type StyleOverrides = {
+  segments?: number
+  warnAt?: number
+  alertAt?: number
+  palette?: string
+  flashSeconds?: number
+  /** 0 : Pixel ne s'endort jamais. */
+  sleepAfterMinutes?: number
+}
+
+export type Prefs = {
+  isHidden: boolean
+  overrides: { [K in InfoKey]?: boolean }
+  style?: StyleOverrides
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -81,6 +121,7 @@ declare module 'claude-code' {
       activity: Activity
       prefs: Prefs
       mascot: Mascot
+      schedule: Schedule
       tick: number
     }
   }

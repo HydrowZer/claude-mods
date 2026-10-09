@@ -1,15 +1,35 @@
 import { atom, read, update } from 'claude-code'
 import type {
+  BoxProps,
+  ClientProps,
+  ElementConstructor,
   EngineInterface,
   Register,
+  RenderElement,
   SessionContextUsage,
   SessionCost,
   SessionRateLimit,
+  SvgProps,
   TextProps,
 } from 'claude-code'
 
-import type { Activity, GitState, Info, InfoKey, Limit, Mascot, Mood, Prefs, Usage } from '../types'
+import type {
+  Activity,
+  CronJob,
+  GitState,
+  Info,
+  InfoKey,
+  Limit,
+  Mascot,
+  Mood,
+  Prefs,
+  Schedule,
+  StyleOverrides,
+  TaskItem,
+  Usage,
+} from '../types'
 import { MASCOT_HEIGHT, MASCOT_WIDTH, MOODS, mascotSvg } from './mascot'
+import { describeCron, loopLabel, minutes, nextFire, shorten, until } from './schedule'
 
 // ─── Réglages ────────────────────────────────────────────────────────────────
 // Tout se personnalise ici : le bandeau se recharge à chaque enregistrement.
@@ -30,6 +50,9 @@ const DEFAULT_SHOW: Record<InfoKey, boolean> = {
   contexte: true, // place libre dans la fenêtre de contexte
   limites: true, // limites 5 h, 7 j…
   reset: true, // temps avant le reset de chaque limite
+  boucles: true, // ⟳ /loop, tâches programmées et réveils, avec le prochain passage
+  taches: true, // Tâches ▰▰▰▱▱ 3/7 · ce que Claude fait en ce moment
+  arriereplan: true, // ▸ commandes et agents qui tournent en arrière-plan
   mascotte: true, // Pixel, tout à droite
 }
 
@@ -62,6 +85,8 @@ const SETTINGS = {
     removed: '#f87171',
     ahead: '#7cc4ff',
     behind: '#fb923c',
+    loop: '#7cc4ff',
+    tasks: '#a78bfa',
   },
   /** Noms courts des limites. */
   limitLabels: { five_hour: '5 h', seven_day: '7 j', spend_limit: 'Plafond' } as Record<string, string>,
@@ -81,11 +106,74 @@ const SETTINGS = {
   },
 }
 
+/** Couleurs des jauges au choix dans le panneau : beaucoup de marge, ça baisse, limite proche. */
+const PALETTES: Record<string, { label: string; ok: string; warn: string; alert: string }> = {
+  classique: { label: 'Classique', ok: '#4ade80', warn: '#fb923c', alert: '#f87171' },
+  ocean: { label: 'Océan', ok: '#7cc4ff', warn: '#a78bfa', alert: '#f472b6' },
+  neon: { label: 'Néon', ok: '#22d3ee', warn: '#facc15', alert: '#e879f9' },
+  pastel: { label: 'Pastel', ok: '#86efac', warn: '#fcd34d', alert: '#fca5a5' },
+  sobre: { label: 'Sobre', ok: '#d4d4d8', warn: '#a1a1aa', alert: '#f87171' },
+}
+
+type Style = {
+  segments: number
+  warnAt: number
+  alertAt: number
+  palette: string
+  ok: string
+  warn: string
+  alert: string
+  flashSeconds: number
+  sleepAfterMinutes: number
+}
+
+function resolveStyle(o: StyleOverrides | undefined): Style {
+  const palette = o?.palette && PALETTES[o.palette] ? o.palette : 'classique'
+  const colors = PALETTES[palette] ?? { ok: SETTINGS.colors.ok, warn: SETTINGS.colors.warn, alert: SETTINGS.colors.alert }
+
+  return {
+    segments: o?.segments ?? SETTINGS.segments,
+    warnAt: o?.warnAt ?? SETTINGS.warnAt,
+    alertAt: o?.alertAt ?? SETTINGS.alertAt,
+    palette,
+    ok: colors.ok,
+    warn: colors.warn,
+    alert: colors.alert,
+    flashSeconds: o?.flashSeconds ?? SETTINGS.mascot.flashSeconds,
+    sleepAfterMinutes: o?.sleepAfterMinutes ?? SETTINGS.mascot.sleepAfterMinutes,
+  }
+}
+
+/** Les réglages en vigueur : ceux du code, corrigés par ceux du panneau. */
+let style = resolveStyle(undefined)
+
 /** Ce que fait Pixel quand on clique dessus, à tour de rôle. */
 const POKE_MOODS: Mood[] = ['giggle', 'boing', 'surprise', 'love']
 
 /** La zone tactile posée sur Pixel. */
 const TOUCH_KEY = 'pixel-touch'
+
+/** Le panneau de réglages, ouvert par `/bandeau`. */
+const PANE = 'usage-band-reglages'
+
+const INFO_LABELS: Record<InfoKey, string> = {
+  etat: 'État',
+  modele: 'Modèle',
+  projet: 'Projet',
+  branche: 'Branche',
+  git: 'Git',
+  duree: 'Durée',
+  cout: 'Coût',
+  outils: 'Outils',
+  fichiers: 'Fichiers',
+  contexte: 'Contexte',
+  limites: 'Limites',
+  reset: 'Resets',
+  boucles: 'Boucles',
+  taches: 'Tâches',
+  arriereplan: 'Arrière-plan',
+  mascotte: 'Pixel',
+}
 
 /** Ce que fait Pixel pendant chaque outil ; les autres le font réfléchir. */
 const TOOL_MOODS: Record<string, Mood> = {
@@ -140,6 +228,13 @@ const mascot = atom({ plugin: 'usage-band', key: 'mascot' } as const, {
   pokes: [],
   pokeCount: 0,
 })
+const schedule = atom({ plugin: 'usage-band', key: 'schedule' } as const, {
+  crons: [],
+  wakeup: null,
+  fires: {},
+  tasks: [],
+  background: [],
+})
 const tick = atom({ plugin: 'usage-band', key: 'tick' } as const, 0)
 
 let lastGitAt = 0
@@ -153,6 +248,15 @@ const ALIASES: Record<string, InfoKey> = {
   temps: 'duree',
   mascot: 'mascotte',
   pixel: 'mascotte',
+  loop: 'boucles',
+  loops: 'boucles',
+  cron: 'boucles',
+  reveil: 'boucles',
+  tasks: 'taches',
+  todo: 'taches',
+  goal: 'taches',
+  objectif: 'taches',
+  background: 'arriereplan',
   prix: 'cout',
   ctx: 'contexte',
 }
@@ -181,9 +285,14 @@ function normalize(text: string): string {
 
 function isPrefs(value: unknown): value is Prefs {
   if (typeof value !== 'object' || value === null) return false
-  const { isHidden, overrides } = value as Record<string, unknown>
+  const { isHidden, overrides, style: saved } = value as Record<string, unknown>
 
-  return typeof isHidden === 'boolean' && typeof overrides === 'object' && overrides !== null
+  return (
+    typeof isHidden === 'boolean' &&
+    typeof overrides === 'object' &&
+    overrides !== null &&
+    (saved === undefined || (typeof saved === 'object' && saved !== null))
+  )
 }
 
 function prettyModel(id: string): string {
@@ -227,14 +336,6 @@ function pct(left: number): string {
   return `${String(value).replace('.', ',')} %`
 }
 
-function minutes(min: number): string {
-  if (min < 60) return `${min} min`
-  const h = Math.floor(min / 60)
-  if (h < 24) return `${h} h ${String(min % 60).padStart(2, '0')}`
-
-  return `${Math.floor(h / 24)} j ${h % 24} h`
-}
-
 function untilReset(resetsAt: string | undefined, now: number): string | null {
   if (!resetsAt) return null
   const ms = Date.parse(resetsAt) - now
@@ -243,15 +344,13 @@ function untilReset(resetsAt: string | undefined, now: number): string | null {
 }
 
 function toneFor(used: number): string {
-  const { ok, warn, alert } = SETTINGS.colors
-
-  return used >= SETTINGS.alertAt ? alert : used >= SETTINGS.warnAt ? warn : ok
+  return used >= style.alertAt ? style.alert : used >= style.warnAt ? style.warn : style.ok
 }
 
 function gauge(key: string, label: string, used: number, tail: string | null): Chunk {
   const color = toneFor(used)
   const left = Math.min(100, Math.max(0, 100 - used))
-  const filled = Math.round((left / 100) * SETTINGS.segments)
+  const filled = Math.round((left / 100) * style.segments)
   const parts: Part[] = [
     dim(label),
     { filled, color, alt: `${label} : ${pct(left)} restant` },
@@ -264,8 +363,8 @@ function gauge(key: string, label: string, used: number, tail: string | null): C
 
 function meterSvg({ filled, color }: Meter): string {
   const { width, height, gap, radius } = SETTINGS.segment
-  const total = SETTINGS.segments * width + (SETTINGS.segments - 1) * gap
-  const rects = Array.from({ length: SETTINGS.segments }, (_, i) => {
+  const total = style.segments * width + (style.segments - 1) * gap
+  const rects = Array.from({ length: style.segments }, (_, i) => {
     const fill = i < filled ? `fill="${color}"` : `fill="${SETTINGS.colors.track}" fill-opacity="${SETTINGS.trackOpacity}"`
 
     return `<rect x="${i * (width + gap)}" y="0" width="${width}" height="${height}" rx="${radius}" ${fill}/>`
@@ -368,6 +467,111 @@ async function refresh($: EngineInterface): Promise<void> {
   }
 }
 
+type Call = { tool: string } & Record<string, unknown>
+
+const asString = (value: unknown): string | null => (typeof value === 'string' ? value : null)
+const isStatus = (value: unknown): value is TaskItem['status'] =>
+  value === 'pending' || value === 'in_progress' || value === 'completed'
+
+/** Ce qu'un appel d'outil réussi change aux boucles, au réveil et aux tâches. */
+function scheduleAfter(s: Schedule, e: Call, result: unknown): Schedule {
+  const r = (typeof result === 'object' && result !== null ? result : {}) as Record<string, unknown>
+
+  switch (e.tool) {
+    case 'CronCreate': {
+      const id = asString(r.id)
+      const cron = asString(e.cron)
+      if (id === null || cron === null) return s
+      const job: CronJob = { id, cron, prompt: asString(e.prompt) ?? '', recurring: e.recurring !== false }
+
+      return { ...s, crons: [...s.crons.filter(c => c.id !== id), job] }
+    }
+    case 'CronDelete':
+      return { ...s, crons: s.crons.filter(c => c.id !== e.id) }
+    case 'CronList': {
+      if (!Array.isArray(r.jobs)) return s
+      const crons = (r.jobs as Array<Record<string, unknown>>).flatMap((job): CronJob[] => {
+        const id = asString(job.id)
+        const cron = asString(job.cron)
+
+        return id && cron ? [{ id, cron, prompt: asString(job.prompt) ?? '', recurring: job.recurring !== false }] : []
+      })
+
+      return { ...s, crons }
+    }
+    case 'ScheduleWakeup': {
+      const at = typeof r.scheduledFor === 'number' ? r.scheduledFor : null
+      if (e.stop === true || r.stopped === true || at === null) return { ...s, wakeup: null }
+
+      return { ...s, wakeup: { at, reason: asString(e.reason), prompt: asString(e.prompt) } }
+    }
+    case 'TaskCreate': {
+      const task = (r.task ?? {}) as Record<string, unknown>
+      const id = asString(task.id)
+      if (id === null) return s
+      const item: TaskItem = {
+        id,
+        subject: asString(task.subject) ?? asString(e.subject) ?? '',
+        activeForm: asString(e.activeForm),
+        status: 'pending',
+      }
+
+      return { ...s, tasks: [...s.tasks.filter(t => t.id !== id), item] }
+    }
+    case 'TaskUpdate': {
+      if (e.status === 'deleted') return { ...s, tasks: s.tasks.filter(t => t.id !== e.taskId) }
+
+      return {
+        ...s,
+        tasks: s.tasks.map(t =>
+          t.id !== e.taskId
+            ? t
+            : {
+                ...t,
+                subject: asString(e.subject) ?? t.subject,
+                activeForm: asString(e.activeForm) ?? t.activeForm,
+                status: isStatus(e.status) ? e.status : t.status,
+              },
+        ),
+      }
+    }
+    case 'TaskList': {
+      if (!Array.isArray(r.tasks)) return s
+      const tasks = (r.tasks as Array<Record<string, unknown>>).flatMap((task): TaskItem[] => {
+        const id = asString(task.id)
+        if (id === null) return []
+        const known = s.tasks.find(t => t.id === id)
+
+        return [
+          {
+            id,
+            subject: asString(task.subject) ?? known?.subject ?? '',
+            activeForm: known?.activeForm ?? null,
+            status: isStatus(task.status) ? task.status : 'pending',
+          },
+        ]
+      })
+
+      return { ...s, tasks }
+    }
+    case 'TodoWrite': {
+      if (!Array.isArray(e.todos)) return s
+      const tasks = (e.todos as Array<Record<string, unknown>>).map(
+        (todo, i): TaskItem => ({
+          id: `todo-${i}`,
+          subject: asString(todo.content) ?? '',
+          activeForm: asString(todo.activeForm),
+          status: isStatus(todo.status) ? todo.status : 'pending',
+        }),
+      )
+
+      return { ...s, tasks }
+    }
+    default:
+      return s
+  }
+}
+
 function moodFor(m: Mascot, isWorking: boolean, u: Usage | null, now: number): Mood {
   const running = Object.values(m.running)
   const tool = running[running.length - 1]
@@ -376,13 +580,15 @@ function moodFor(m: Mascot, isWorking: boolean, u: Usage | null, now: number): M
   if (m.hoverUntil != null && m.hoverUntil > now) return 'hello'
   if (isWorking) return 'think'
 
-  const { alertContextFree, sleepAfterMinutes } = SETTINGS.mascot
+  const { alertContextFree } = SETTINGS.mascot
+  const { sleepAfterMinutes } = style
   const isTight =
     u !== null &&
-    (u.limits.some(limit => limit.percentUsed >= SETTINGS.alertAt) ||
+    (u.limits.some(limit => limit.percentUsed >= style.alertAt) ||
       (u.contextPercent != null && 100 - u.contextPercent < alertContextFree))
   if (isTight) return 'alert'
-  if (m.lastActivity != null && now - m.lastActivity > sleepAfterMinutes * 60_000) return 'sleep'
+  const isAsleep = sleepAfterMinutes > 0 && m.lastActivity != null && now - m.lastActivity > sleepAfterMinutes * 60_000
+  if (isAsleep) return 'sleep'
 
   return 'idle'
 }
@@ -395,7 +601,7 @@ async function touch($: EngineInterface, change: (m: Mascot) => Mascot = m => m)
 async function flash(
   $: EngineInterface,
   mood: Mood,
-  seconds = SETTINGS.mascot.flashSeconds,
+  seconds = style.flashSeconds,
   change: (m: Mascot) => Mascot = m => m,
 ): Promise<void> {
   const now = await $.clock.now()
@@ -499,12 +705,71 @@ function gaugeChunks(show: Record<InfoKey, boolean>, u: Usage | null, now: numbe
   return out
 }
 
+function scheduleChunks(show: Record<InfoKey, boolean>, s: Schedule, now: number): Chunk[] {
+  const out: Chunk[] = []
+  const { colors } = SETTINGS
+  const fires = (prompt: string | null) => {
+    const n = prompt === null ? 0 : (s.fires?.[prompt] ?? 0)
+
+    return n > 0 ? [dim(`· ${n}×`)] : []
+  }
+
+  if (show.boucles) {
+    for (const job of s.crons ?? []) {
+      if (!job.recurring && s.wakeup) continue
+      const at = nextFire(job.cron, now)
+      const parts: Part[] = [
+        { text: job.recurring ? '⟳' : '◷', color: colors.loop },
+        { text: loopLabel(job.prompt) },
+        dim(job.recurring ? describeCron(job.cron) : 'rappel'),
+        ...(at === null ? [] : [{ text: until(at - now), color: colors.loop }]),
+        ...fires(job.prompt),
+      ]
+      out.push({ key: `cron-${job.id}`, gap: 1, full: parts, short: parts.filter((_, i) => i !== 2) })
+    }
+
+    const wakeup = s.wakeup
+    if (wakeup) {
+      const parts: Part[] = [
+        { text: '◷', color: colors.loop },
+        { text: wakeup.prompt ? loopLabel(wakeup.prompt) : 'réveil' },
+        { text: until(wakeup.at - now), color: colors.loop },
+        ...fires(wakeup.prompt),
+        ...(wakeup.reason ? [dim(`· ${shorten(wakeup.reason, 40)}`)] : []),
+      ]
+      out.push({ key: 'reveil', gap: 1, full: parts, short: parts.slice(0, 4) })
+    }
+  }
+
+  const tasks = s.tasks ?? []
+  if (show.taches && tasks.some(task => task.status !== 'completed')) {
+    const done = tasks.filter(task => task.status === 'completed').length
+    const current = tasks.find(task => task.status === 'in_progress')
+    const filled = Math.round((done / tasks.length) * style.segments)
+    const parts: Part[] = [
+      dim('Tâches'),
+      { filled, color: colors.tasks, alt: `Tâches : ${done} sur ${tasks.length}` },
+      { text: `${done}/${tasks.length}`, bold: true, color: colors.tasks },
+      ...(current ? [dim(`· ${shorten(current.activeForm ?? current.subject, 40)}`)] : []),
+    ]
+    out.push({ key: 'taches', gap: 1, full: parts, short: parts.slice(0, 3) })
+  }
+
+  const background = s.background ?? []
+  if (show.arriereplan && background.length > 0) {
+    const kinds = [...new Set(background.map(task => task.type))].join(', ')
+    out.push(same('arriereplan', [{ text: '▸ ', color: colors.loop }, dim(`${background.length} en arrière-plan (${kinds})`)]))
+  }
+
+  return out
+}
+
 function lineWidth(chunks: Chunk[]): number {
   const cells = chunks.reduce(
     (n, chunk) =>
       n +
       chunk.gap * Math.max(0, chunk.full.length - 1) +
-      chunk.full.reduce((m, part) => m + (isMeter(part) ? SETTINGS.segments : [...part.text].length), 0),
+      chunk.full.reduce((m, part) => m + (isMeter(part) ? style.segments : [...part.text].length), 0),
     0,
   )
 
@@ -520,6 +785,114 @@ function textProps(span: Span): TextProps {
   return props
 }
 
+async function changePrefs($: EngineInterface, change: (p: Prefs) => Prefs): Promise<Prefs> {
+  await update($, prefs, change)
+  const saved = await read($, prefs)
+  style = resolveStyle(saved.style)
+  await $.store.set('prefs', saved)
+
+  return saved
+}
+
+type Els = {
+  Box: ElementConstructor<BoxProps>
+  Text: ElementConstructor<TextProps>
+  Svg?: ElementConstructor<SvgProps>
+  Client?: ElementConstructor<ClientProps>
+}
+
+type BandView = {
+  show: Record<InfoKey, boolean>
+  u: Usage | null
+  i: Info
+  a: Activity
+  m: Mascot
+  s: Schedule
+  now: number
+  isWorking: boolean
+  /** Cellules disponibles pour le bandeau. */
+  columns: number
+  /** L'aperçu du panneau : pas de zone tactile sur Pixel. */
+  isPreview: boolean
+}
+
+/** Le bandeau dessiné, pour le vrai bandeau comme pour l'aperçu du panneau. */
+function drawBand({ Box, Text, Svg, Client }: Els, v: BandView): RenderElement | null {
+  const mood = v.show.mascotte ? moodFor(v.m, v.isWorking, v.u, v.now) : null
+  const lines = [
+    { key: 'infos', chunks: topChunks(v.show, v.u, v.i, v.a, v.now, v.isWorking) },
+    { key: 'jauges', chunks: gaugeChunks(v.show, v.u, v.now) },
+    { key: 'programme', chunks: scheduleChunks(v.show, v.s, v.now) },
+  ].filter(line => line.chunks.length > 0)
+
+  if (lines.length === 0 && mood === null) return null
+
+  const { width, height, gap } = SETTINGS.segment
+  const meterWidth = style.segments * width + (style.segments - 1) * gap
+  const mascotCells = mood === null ? 0 : (Svg ? 10 : [...MOODS[mood].kao].length) + 2
+  const room = v.columns - mascotCells
+
+  const drawMeter = (meter: Meter) => {
+    if (Svg) {
+      return <Svg source={meterSvg(meter)} alt={meter.alt} width={meterWidth} height={height} />
+    }
+
+    const glyphs = [
+      { text: SETTINGS.full.repeat(meter.filled), color: meter.color },
+      { text: SETTINGS.empty.repeat(style.segments - meter.filled), color: SETTINGS.colors.track, dim: true },
+    ].filter(glyph => glyph.text !== '')
+
+    return (
+      <Box flexDirection="row">
+        {glyphs.map(glyph => (
+          <Text {...textProps(glyph)}>{glyph.text}</Text>
+        ))}
+      </Box>
+    )
+  }
+
+  const draw = (part: Part) => (isMeter(part) ? drawMeter(part) : <Text {...textProps(part)}>{part.text}</Text>)
+
+  const drawMascot = (current: Mood) =>
+    Svg ? (
+      <Svg source={mascotSvg(current)} alt={`Mascotte : ${MOODS[current].label}`} width={MASCOT_WIDTH} height={MASCOT_HEIGHT} />
+    ) : (
+      <Text color={SETTINGS.mascot.color} bold>
+        {MOODS[current].kao}
+      </Text>
+    )
+
+  return (
+    <Box flexDirection="row" alignItems="center" columnGap={2}>
+      <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+        {lines.map(line => {
+          const isShort = lineWidth(line.chunks) > room
+
+          return (
+            <Box key={line.key} flexDirection="row" flexWrap="wrap" columnGap={SETTINGS.gap}>
+              {line.chunks.map(chunk => (
+                <Box key={`${line.key}-${chunk.key}`} flexDirection="row" alignItems="center" columnGap={chunk.gap}>
+                  {(isShort ? chunk.short : chunk.full).filter(part => isMeter(part) || part.text !== '').map(draw)}
+                </Box>
+              ))}
+            </Box>
+          )
+        })}
+      </Box>
+      {mood !== null && (
+        <Box key="mascotte" flexShrink={0}>
+          {drawMascot(mood)}
+          {Client && !v.isPreview && (
+            <Box position="absolute" top={0} left={0} right={0} bottom={0}>
+              <Client key={TOUCH_KEY} module="./touch.ts" width="100%" height="100%" />
+            </Box>
+          )}
+        </Box>
+      )}
+    </Box>
+  )
+}
+
 function describe(p: Prefs): string {
   const show = { ...DEFAULT_SHOW, ...p.overrides }
   const marks = KEYS.map(key => `${show[key] ? '✓' : '✗'} ${key}`).join('   ')
@@ -528,10 +901,11 @@ function describe(p: Prefs): string {
     `Bandeau d'utilisation : ${p.isHidden ? 'masqué' : 'affiché'}`,
     marks,
     '',
+    '/bandeau                                  ouvre le panneau de réglages',
     '/bandeau masquer | afficher               le bandeau entier',
     '/bandeau masquer | afficher <info…>       une ou plusieurs infos (ex. /bandeau masquer cout outils)',
     '/bandeau reset                            revient aux réglages par défaut',
-    'Couleurs, largeur des barres et seuils : en haut de hooks/register.tsx',
+    'Couleurs, segments, seuils et Pixel : dans le panneau (/bandeau), ou en haut de hooks/register.tsx',
   ].join('\n')
 }
 
@@ -539,13 +913,14 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'bandeau',
-      description: "Masque, affiche ou règle les infos du bandeau d'utilisation",
-      argumentHint: '[masquer|afficher|reset] [info…]',
+      description: "Ouvre les réglages du bandeau d'utilisation, ou masque et affiche ses infos",
+      argumentHint: '[masquer|afficher|reset|aide] [info…]',
       immediate: true,
     })
 
     const saved = await $.store.get('prefs')
     if (isPrefs(saved)) await update($, prefs, () => saved)
+    style = resolveStyle((await read($, prefs)).style)
 
     $.clock.every(60_000, () => void update($, tick, n => n + 1))
     await touch($, m => ({ ...m, running: {}, flash: null }))
@@ -559,6 +934,16 @@ export const register: Register = on => {
     void refresh($)
     const isThanks = e.origin.kind === 'composer' && THANKS.test(normalize(e.text))
     await (isThanks ? flash($, 'love') : touch($))
+
+    if (e.origin.kind === 'scheduled-trigger') {
+      const now = await $.clock.now()
+      const prompt = e.text
+      await update($, schedule, (s): Schedule => ({
+        ...s,
+        fires: { ...s.fires, [prompt]: (s.fires?.[prompt] ?? 0) + 1 },
+        wakeup: s.wakeup && s.wakeup.at - 5000 <= now ? null : s.wakeup,
+      }))
+    }
 
     return next(e)
   })
@@ -574,6 +959,27 @@ export const register: Register = on => {
     if (e.reason === 'error') await flash($, 'error')
     else if (e.reason === 'answer' && !isPartying) await flash($, 'done')
     else await touch($)
+
+    return done
+  })
+
+  on('classic.Stop', async ($, e, next) => {
+    const done = await next(e)
+    const crons = e.session_crons ?? []
+    const running = (e.background_tasks ?? []).filter(task => task.status === 'running' || task.status === 'pending')
+
+    await update($, schedule, (s): Schedule => {
+      const known = new Map((s.crons ?? []).map(job => [job.id, job]))
+
+      return {
+        ...s,
+        crons: crons.map(
+          (job): CronJob => known.get(job.id) ?? { id: job.id, cron: job.schedule, prompt: job.prompt, recurring: job.recurring },
+        ),
+        wakeup: crons.some(job => !job.recurring) ? s.wakeup : null,
+        background: running.map(task => ({ type: task.type, description: task.description })),
+      }
+    })
 
     return done
   })
@@ -598,6 +1004,12 @@ export const register: Register = on => {
       }))
     }
     if (ran.deny !== undefined) return ran
+
+    if (ran.isError !== true) {
+      const call = e as unknown as Call
+      const result = (ran as { result?: unknown }).result
+      await update($, schedule, (s): Schedule => scheduleAfter(s, call, result))
+    }
 
     const command = (e as { command?: unknown }).command
     if (ran.isError === true) await flash($, 'error')
@@ -634,16 +1046,22 @@ export const register: Register = on => {
   on('command.run', { command: 'bandeau' }, async ($, e) => {
     const [verb, ...rest] = normalize(e.args).split(/\s+/).filter(Boolean)
     const current = await read($, prefs)
-    const save = async (p: Prefs) => {
-      await update($, prefs, () => p)
-      await $.store.set('prefs', p)
-    }
+    const save = (p: Prefs) => changePrefs($, () => p)
 
-    if (verb === undefined || verb === 'aide') {
+    if (verb === undefined || verb === 'reglages' || verb === 'panneau') {
+      try {
+        await $.ui.open({ id: PANE, title: 'Bandeau', focus: true, closeOnEscape: true, columns: 60 })
+      } catch {
+        return { text: describe(current) }
+      }
+
+      return { text: 'Réglages du bandeau ouverts : chaque changement s\'applique tout de suite.' }
+    }
+    if (verb === 'aide') {
       return { text: describe(current) }
     }
     if (verb === 'reset' || verb === 'defaut') {
-      await save({ isHidden: false, overrides: {} })
+      await save({ isHidden: false, overrides: {}, style: {} })
 
       return { text: 'Bandeau remis aux réglages par défaut.' }
     }
@@ -669,110 +1087,185 @@ export const register: Register = on => {
       const key = ALIASES[word]
       if (key !== undefined) overrides[key] = isShown
     }
-    await save({ isHidden: isShown ? false : current.isHidden, overrides })
+    await save({ ...current, isHidden: isShown ? false : current.isHidden, overrides })
 
     return { text: `${isShown ? 'Affiché' : 'Masqué'} : ${rest.join(', ')}.` }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const p = await read($, prefs)
+    style = resolveStyle(p.style)
     if (e.props.hasSurvey || p.isHidden) return next(e)
 
-    const u = await read($, usage)
-    const i = await read($, info)
-    const a = await read($, activity)
-    const m = await read($, mascot)
     await read($, tick)
-    const now = await $.clock.now()
-    const show = { ...DEFAULT_SHOW, ...p.overrides }
-    const mood = show.mascotte ? moodFor(m, e.props.isWorking, u, now) : null
-
-    const lines = [
-      { key: 'infos', chunks: topChunks(show, u, i, a, now, e.props.isWorking) },
-      { key: 'jauges', chunks: gaugeChunks(show, u, now) },
-    ].filter(line => line.chunks.length > 0)
-
-    if (lines.length === 0 && mood === null) return next(e)
-
     const ui = $.ui.resolve(e)
-    const { Box, Text } = ui
-    const Svg = e.surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined
-    const Client = 'Client' in ui ? ui.Client : undefined
-    const { width, height, gap } = SETTINGS.segment
-    const meterWidth = SETTINGS.segments * width + (SETTINGS.segments - 1) * gap
-    const empty = SETTINGS.segments
-    const mascotCells = mood === null ? 0 : (Svg ? 10 : [...MOODS[mood].kao].length) + 2
-    const room = e.props.bodyColumns - mascotCells
+    const band = drawBand(
+      {
+        Box: ui.Box,
+        Text: ui.Text,
+        Svg: e.surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined,
+        Client: 'Client' in ui ? ui.Client : undefined,
+      },
+      {
+        show: { ...DEFAULT_SHOW, ...p.overrides },
+        u: await read($, usage),
+        i: await read($, info),
+        a: await read($, activity),
+        m: await read($, mascot),
+        s: await read($, schedule),
+        now: await $.clock.now(),
+        isWorking: e.props.isWorking,
+        columns: e.props.bodyColumns,
+        isPreview: false,
+      },
+    )
 
-    const drawMeter = (meter: Meter) => {
-      if (Svg) {
-        return <Svg source={meterSvg(meter)} alt={meter.alt} width={meterWidth} height={height} />
-      }
+    return band ?? next(e)
+  })
 
-      const glyphs = [
-        { text: SETTINGS.full.repeat(meter.filled), color: meter.color },
-        { text: SETTINGS.empty.repeat(empty - meter.filled), color: SETTINGS.colors.track, dim: true },
-      ].filter(glyph => glyph.text !== '')
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const p = await read($, prefs)
+    style = resolveStyle(p.style)
+    await read($, tick)
+    const ui = $.ui.resolve(e)
+    const { Box, Text, Button } = ui
+    const Select = 'Select' in ui ? ui.Select : undefined
+    const show = { ...DEFAULT_SHOW, ...p.overrides }
+    const o = p.style ?? {}
 
-      return (
-        <Box flexDirection="row">
-          {glyphs.map(glyph => (
-            <Text {...textProps(glyph)}>{glyph.text}</Text>
-          ))}
-        </Box>
-      )
+    const preview = drawBand(
+      { Box, Text, Svg: e.surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined },
+      {
+        show,
+        u: await read($, usage),
+        i: await read($, info),
+        a: await read($, activity),
+        m: await read($, mascot),
+        s: await read($, schedule),
+        now: await $.clock.now(),
+        isWorking: false,
+        columns: Math.max(20, e.props.bodyColumns - 4),
+        isPreview: true,
+      },
+    )
+
+    const setStyle = (change: StyleOverrides) =>
+      void changePrefs($, cur => ({ ...cur, style: { ...cur.style, ...change } }))
+    const options = (values: number[], label: (n: number) => string) =>
+      values.map(n => ({ value: String(n), label: label(n) }))
+
+    // Une liste de choix ; là où l'app n'en a pas (mobile), un bouton qui passe à l'option suivante.
+    const choice = (
+      key: string,
+      label: string,
+      value: string,
+      list: Array<{ value: string; label: string }>,
+      pick: (value: string) => void,
+    ) => {
+      if (Select) return <Select key={key} label={label} value={value} options={list} onSelect={picked => pick(picked)} />
+
+      const at = list.findIndex(option => option.value === value)
+      const following = list[(at + 1) % list.length] ?? list[0]
+      const current = list[at]?.label ?? value
+
+      return <Button key={key} label={`${label} : ${current} ▸`} onPress={() => following && pick(following.value)} />
     }
 
-    const draw = (part: Part) =>
-      isMeter(part) ? drawMeter(part) : <Text {...textProps(part)}>{part.text}</Text>
-
-    const drawMascot = (current: Mood) =>
-      Svg ? (
-        <Svg
-          source={mascotSvg(current)}
-          alt={`Mascotte : ${MOODS[current].label}`}
-          width={MASCOT_WIDTH}
-          height={MASCOT_HEIGHT}
-        />
-      ) : (
-        <Text color={SETTINGS.mascot.color} bold>
-          {MOODS[current].kao}
-        </Text>
-      )
-
     return (
-      <Box flexDirection="row" alignItems="center" columnGap={2}>
-        <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-          {lines.map(line => {
-            const isShort = lineWidth(line.chunks) > room
-
-            return (
-              <Box key={line.key} flexDirection="row" flexWrap="wrap" columnGap={SETTINGS.gap}>
-                {line.chunks.map(chunk => (
-                  <Box
-                    key={`${line.key}-${chunk.key}`}
-                    flexDirection="row"
-                    alignItems="center"
-                    columnGap={chunk.gap}
-                  >
-                    {(isShort ? chunk.short : chunk.full)
-                      .filter(part => isMeter(part) || part.text !== '')
-                      .map(draw)}
-                  </Box>
-                ))}
-              </Box>
-            )
-          })}
-        </Box>
-        {mood !== null && (
-          <Box key="mascotte" flexShrink={0}>
-            {drawMascot(mood)}
-            {Client && (
-              <Box position="absolute" top={0} left={0} right={0} bottom={0}>
-                <Client key={TOUCH_KEY} module="./touch.ts" width="100%" height="100%" />
-              </Box>
-            )}
+      <Box flexDirection="column" rowGap={1}>
+        <Box flexDirection="column">
+          <Text bold>Aperçu</Text>
+          <Box borderStyle="round" borderColor="#5a5a55" paddingX={1}>
+            {preview ?? <Text dimColor>Rien à afficher : tout est masqué.</Text>}
           </Box>
+        </Box>
+
+        <Box flexDirection="column">
+          <Text bold>Infos affichées</Text>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+            {KEYS.map(key => (
+              <Button
+                key={`info-${key}`}
+                label={`${show[key] ? '●' : '○'} ${INFO_LABELS[key]}`}
+                dimColor={!show[key]}
+                onPress={() =>
+                  void changePrefs($, cur => ({
+                    ...cur,
+                    overrides: { ...cur.overrides, [key]: !({ ...DEFAULT_SHOW, ...cur.overrides }[key]) },
+                  }))
+                }
+              />
+            ))}
+          </Box>
+        </Box>
+
+        <Box flexDirection="column" rowGap={1}>
+          <Text bold>Jauges</Text>
+          {choice(
+            'palette',
+            "Couleurs",
+            style.palette,
+            Object.entries(PALETTES).map(([value, palette]) => ({ value, label: palette.label })),
+            value => setStyle({ palette: value }),
+          )}
+          {choice(
+            'segments',
+            "Segments par jauge",
+            String(style.segments),
+            options([5, 8, 10, 12, 15, 20], n => `${n} segments`),
+            value => setStyle({ segments: Number(value) }),
+          )}
+          {choice(
+            'warnAt',
+            "Orange à partir de",
+            String(style.warnAt),
+            options([50, 60, 70, 80], n => `${n} % consommés`),
+            value => setStyle({ warnAt: Number(value) }),
+          )}
+          {choice(
+            'alertAt',
+            "Rouge à partir de",
+            String(style.alertAt),
+            options([80, 85, 90, 95], n => `${n} % consommés`),
+            value => setStyle({ alertAt: Number(value) }),
+          )}
+        </Box>
+
+        <Box flexDirection="column" rowGap={1}>
+          <Text bold>Pixel</Text>
+          {choice(
+            'flashSeconds',
+            "Durée de ses réactions",
+            String(style.flashSeconds),
+            options([2, 4, 6, 10], n => `${n} secondes`),
+            value => setStyle({ flashSeconds: Number(value) }),
+          )}
+          {choice(
+            'sleepAfterMinutes',
+            "S'endort après",
+            String(style.sleepAfterMinutes),
+            options([5, 10, 30, 0], n => (n === 0 ? 'Jamais' : `${n} minutes sans activité`)),
+            value => setStyle({ sleepAfterMinutes: Number(value) }),
+          )}
+        </Box>
+
+        <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+          <Button
+            key="visible"
+            label={p.isHidden ? 'Afficher le bandeau' : 'Masquer le bandeau'}
+            onPress={() => void changePrefs($, cur => ({ ...cur, isHidden: !cur.isHidden }))}
+          />
+          <Button
+            key="defaut"
+            label="Tout réinitialiser"
+            onPress={() => void changePrefs($, () => ({ isHidden: false, overrides: {}, style: {} }))}
+          />
+          <Button key="fermer" label="Fermer" role="dismiss" onPress={() => void $.ui.close({ id: PANE })} />
+        </Box>
+        {Object.keys(o).length > 0 || Object.keys(p.overrides).length > 0 ? (
+          <Text dimColor>Tes réglages sont enregistrés et gardés d'une session à l'autre.</Text>
+        ) : (
+          <Text dimColor>Chaque changement s'applique tout de suite au bandeau.</Text>
         )}
       </Box>
     )

@@ -311,3 +311,169 @@ test('Pixel fait coucou quand la souris passe dessus', async ($, on) => {
   await band.pointer({ type: 'leave', x: 0, y: 0, in: 'pixel-touch' })
   expect(await pixelLabel(band)).toBe('Mascotte : au repos')
 })
+
+function tools(on: On) {
+  let created = 0
+  on('tool.call', (_$, e) => {
+    switch (e.tool) {
+      case 'CronCreate':
+        return { result: { id: 'c1', humanSchedule: 'Every 5 minutes', recurring: true }, text: 'ok' }
+      case 'ScheduleWakeup':
+        return { result: { scheduledFor: NOW + 12 * 60_000, clampedDelaySeconds: 720, wasClamped: false }, text: 'ok' }
+      case 'TaskCreate': {
+        created += 1
+        const subject = String((e as { subject?: unknown }).subject)
+        return { result: { task: { id: 'ABC'.charAt(created - 1), subject } }, text: 'ok' }
+      }
+      default:
+        return { result: null, text: 'ok' }
+    }
+  })
+}
+
+test('affiche une /loop avec son rythme, le prochain passage et ses tours', async ($, on) => {
+  world(on)
+  tools(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await measure($)
+
+  await $.tool.call({ tool: 'CronCreate', cron: '*/5 * * * *', prompt: '/babysit-prs', recurring: true })
+  let text = await shown($)
+  expect(text).toContain('⟳/babysit-prstoutes les 5 mindans 5 min')
+
+  await $.prompt.submit({ text: '/babysit-prs', wait: false, origin: { kind: 'scheduled-trigger' } })
+  await $.prompt.submit({ text: '/babysit-prs', wait: false, origin: { kind: 'scheduled-trigger' } })
+  expect(await shown($)).toContain('· 2×')
+
+  await $.tool.call({ tool: 'CronDelete', id: 'c1' })
+  text = await shown($)
+  expect(text).not.toContain('⟳')
+})
+
+test('affiche le réveil d\'une boucle dynamique avec sa raison', async ($, on) => {
+  world(on)
+  tools(on)
+  await measure($)
+
+  await $.tool.call({
+    tool: 'ScheduleWakeup',
+    delaySeconds: 720,
+    reason: 'surveille la CI du déploiement',
+    prompt: '<<autonomous-loop-dynamic>>',
+  })
+  expect(await shown($)).toContain('◷boucle autonomedans 12 min· surveille la CI du déploiement')
+
+  await $.tool.call({ tool: 'ScheduleWakeup', stop: true })
+  expect(await shown($)).not.toContain('◷')
+})
+
+test('affiche la progression des tâches et celle en cours', async ($, on) => {
+  world(on)
+  tools(on)
+  await measure($)
+
+  for (const subject of ['Ajouter les tests', 'Corriger Windows', 'Publier']) {
+    await $.tool.call({ tool: 'TaskCreate', subject, description: subject })
+  }
+  await $.tool.call({ tool: 'TaskUpdate', taskId: 'A', status: 'completed' })
+  await $.tool.call({ tool: 'TaskUpdate', taskId: 'C', status: 'in_progress', activeForm: 'Publication en cours' })
+
+  const text = await shown($)
+  expect(text).toContain('Tâches▰▰▰▱▱▱▱▱▱▱1/3· Publication en cours')
+
+  for (const id of ['B', 'C']) await $.tool.call({ tool: 'TaskUpdate', taskId: id, status: 'completed' })
+  expect(await shown($)).not.toContain('Tâches')
+})
+
+test('la fin de tour synchronise les boucles et le travail en arrière-plan', async ($, on) => {
+  world(on)
+  on('classic.Stop', () => ({}))
+  await measure($)
+
+  await $.classic.Stop({
+    stop_hook_active: false,
+    session_crons: [{ id: 'x', schedule: '0 9 * * 1-5', recurring: true, prompt: 'Résume les PR ouvertes' }],
+    background_tasks: [
+      { id: 'b1', type: 'shell', status: 'running', description: 'npm run dev' },
+      { id: 'b2', type: 'subagent', status: 'running', description: 'Revue de code' },
+      { id: 'b3', type: 'shell', status: 'completed', description: 'npm test' },
+    ],
+  })
+
+  const text = await shown($)
+  expect(text).toContain('⟳Résume les PR ouvertesen semaine à 9 h 00')
+  expect(text).toContain('2 en arrière-plan (shell, subagent)')
+})
+
+const PANE_PROPS = {
+  title: 'Bandeau',
+  isFocused: true,
+  bodyColumns: 60,
+  placement: 'dock' as const,
+  scroll: { offset: 0, bodyRows: 40 },
+  view: {},
+}
+
+async function mountPane($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
+  return $.ui.mount({ plugin: 'usage-band', surface, component: 'Pane', requestId: 'usage-band-reglages', props: PANE_PROPS })
+}
+
+test('/bandeau ouvre le panneau de réglages', async ($, on) => {
+  world(on)
+  const opened: string[] = []
+  on('ui.open', (_$, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+
+  const ran = await $.command.run({ ...COMMAND, args: '' })
+
+  expect(opened).toEqual(['usage-band-reglages'])
+  expect(ran.text).toContain('Réglages du bandeau ouverts')
+})
+
+test('le panneau montre un aperçu et masque une info en direct', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  const preview = (await pane.findAll({ type: 'Text' })).map(found => found.text).join('')
+  expect(preview).toContain('Session ≈ 1,84 $')
+  expect((await pane.find({ key: 'info-cout' }))?.props.label).toBe('● Coût')
+
+  await pane.press({ key: 'info-cout' })
+  expect(await shown($)).not.toContain('1,84 $')
+  expect((await pane.find({ key: 'info-cout' }))?.props.label).toBe('○ Coût')
+
+  await pane.press({ key: 'info-cout' })
+  expect(await shown($)).toContain('1,84 $')
+})
+
+test('le panneau change les segments et les couleurs en direct', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  await pane.select({ key: 'segments', value: '5' })
+  expect(await shown($)).toContain('Ctx▰▰▰▱▱62 %')
+
+  await pane.select({ key: 'palette', value: 'ocean' })
+  const band = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  const ctx = (await band.findAll({ type: 'Svg' })).find(found => found.props.alt === 'Ctx : 62 % restant')
+  expect(String(ctx?.props.source)).toContain('fill="#7cc4ff"')
+
+  await pane.press({ key: 'defaut' })
+  expect(await shown($)).toContain('Ctx▰▰▰▰▰▰▱▱▱▱62 %')
+})
+
+test('dans le panneau, Pixel peut ne jamais s\'endormir', async ($, on) => {
+  const clock = world(on)
+  await measure($)
+  await $.tool.call({ tool: 'Read', file_path: '/a.ts' }).catch(() => undefined)
+  const pane = await mountPane($)
+
+  await pane.select({ key: 'sleepAfterMinutes', value: '0' })
+  await clock.advance(30 * 60_000)
+
+  expect(await shown($)).toContain('(•ᴗ•)')
+})

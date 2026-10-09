@@ -8,7 +8,7 @@
     {
       "name": "usage-band",
       "source": "./usage-band",
-      "description": "Bandeau au-dessus du prompt : modèle, projet, état git, coût, contexte et limites en jauges à segments, avec Pixel, une mascotte qui réagit"
+      "description": "Bandeau au-dessus du prompt : modèle, projet, état git, coût, contexte, limites, boucles et tâches en cours, avec Pixel, une mascotte qui réagit, et un panneau de réglages en direct"
     }
   ]
 }
