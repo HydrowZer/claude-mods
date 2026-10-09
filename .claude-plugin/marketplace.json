@@ -1,11 +1,14 @@
 {
   "name": "claude-mods",
-  "owner": { "name": "HydrowZer" },
+  "owner": {
+    "name": "HydrowZer"
+  },
+  "description": "Mods pour Claude Code",
   "plugins": [
     {
       "name": "usage-band",
       "source": "./usage-band",
-      "description": "Bandeau au-dessus du prompt : coût de la session et utilisation restante (5 h / 7 j)"
+      "description": "Bandeau au-dessus du prompt : modèle, projet, coût, contexte et limites d'utilisation en jauges à segments"
     }
   ]
 }
