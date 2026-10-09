@@ -48,6 +48,8 @@ const SETTINGS = {
   alertAt: 90,
   /** Espace entre deux infos, en caractères. */
   gap: 3,
+  /** Au-delà de cette longueur, le nom du projet est coupé avec « … ». */
+  projectMaxLength: 30,
   /** Couleurs : un nom (`green`) ou de l'hexadécimal. */
   colors: {
     ok: '#4ade80',
@@ -189,7 +191,13 @@ function prettyModel(id: string): string {
 }
 
 function basename(path: string): string | null {
-  return path.split('/').filter(Boolean).pop() ?? null
+  const name = path.split(/[\\/]/).filter(Boolean).pop()
+  if (name === undefined) return null
+
+  const chars = [...name]
+  const max = SETTINGS.projectMaxLength
+
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : name
 }
 
 function plural(n: number, word: string): string {

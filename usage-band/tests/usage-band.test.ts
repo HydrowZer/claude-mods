@@ -38,7 +38,7 @@ const COMMAND = {
   presentation: { isFullscreen: false, columns: 160 },
 }
 
-function world(on: On) {
+function world(on: On, cwd = '/Users/moi/Developer/Bouilles') {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -54,7 +54,7 @@ function world(on: On) {
     },
   }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
-  on('session.cwd', () => ({ value: '/Users/moi/Developer/Bouilles' }))
+  on('session.cwd', () => ({ value: cwd }))
   on('process.run', (_$, e) => ({
     value: {
       exitCode: 0,
@@ -232,4 +232,23 @@ test('/bandeau masquer mascotte retire Pixel', async ($, on) => {
 
   expect(await shown($)).not.toContain('(•ᴗ•)')
   expect(await shown($)).toContain('72 %')
+})
+
+test('sous Windows, affiche seulement le nom du dossier', async ($, on) => {
+  const clock = world(on, 'C:\\Users\\jaluc\\OneDrive\\Bureau\\PROJET IA\\SCUBILOODMAINONEDRIVE')
+  await $.session.start({ cwd: 'C:\\Users\\jaluc', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const text = await shown($, 'desktop')
+
+  expect(text).toContain('SCUBILOODMAINONEDRIVE · main')
+  expect(text).not.toContain('C:')
+  expect(text).toContain('Session ≈ 1,84 $')
+})
+
+test('coupe un nom de projet trop long', async ($, on) => {
+  const clock = world(on, '/home/moi/un-nom-de-projet-vraiment-beaucoup-trop-long')
+  await $.session.start({ cwd: '/home/moi', surface: 'terminal', isInteractive: true })
+  await clock.advance(1)
+
+  expect(await shown($)).toContain('un-nom-de-projet-vraiment-bea… · main')
 })
