@@ -432,20 +432,20 @@ test('/bandeau ouvre le panneau de réglages', async ($, on) => {
   expect(ran.text).toContain('Réglages du bandeau ouverts')
 })
 
-test('le panneau montre un aperçu et masque une info en direct', async ($, on) => {
+test('le panneau montre un aperçu et masque un bloc en direct', async ($, on) => {
   world(on)
   await measure($)
   const pane = await mountPane($)
 
   const preview = (await pane.findAll({ type: 'Text' })).map(found => found.text).join('')
   expect(preview).toContain('Session ≈ 1,84 $')
-  expect((await pane.find({ key: 'info-cout' }))?.props.label).toBe('● Coût')
 
-  await pane.press({ key: 'info-cout' })
+  await pane.press({ key: 'bloc-cout' })
+  await pane.press({ key: 'action-masquer' })
   expect(await shown($)).not.toContain('1,84 $')
-  expect((await pane.find({ key: 'info-cout' }))?.props.label).toBe('○ Coût')
+  expect((await pane.findAll({ type: 'Text' })).map(found => found.text)).toContain('Masqués')
 
-  await pane.press({ key: 'info-cout' })
+  await pane.press({ key: 'action-afficher' })
   expect(await shown($)).toContain('1,84 $')
 })
 
@@ -454,6 +454,7 @@ test('le panneau change les segments et les couleurs en direct', async ($, on) =
   await measure($)
   const pane = await mountPane($)
 
+  await pane.press({ key: 'onglet-style' })
   await pane.select({ key: 'segments', value: '5' })
   expect(await shown($)).toContain('Ctx▰▰▰▱▱62 %')
 
@@ -472,8 +473,214 @@ test('dans le panneau, Pixel peut ne jamais s\'endormir', async ($, on) => {
   await $.tool.call({ tool: 'Read', file_path: '/a.ts' }).catch(() => undefined)
   const pane = await mountPane($)
 
+  await pane.press({ key: 'onglet-pixel' })
   await pane.select({ key: 'sleepAfterMinutes', value: '0' })
   await clock.advance(30 * 60_000)
 
   expect(await shown($)).toContain('(•ᴗ•)')
+})
+
+async function texts(band: { findAll: (q: { type: string }) => Promise<Array<{ text: string }>> }): Promise<string[]> {
+  return (await band.findAll({ type: 'Text' })).map(found => found.text)
+}
+
+test('profil Minimal : une ligne, des points ronds, juste le coût et les jauges', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  await pane.press({ key: 'profil-minimal' })
+  const text = await shown($)
+
+  expect(text).toContain('Ctx●●●●●○○○62 %')
+  expect(text).toContain('1,84 $')
+  expect(text).not.toContain('outils')
+  expect(text).not.toContain('Opus')
+})
+
+test('formes des jauges dans l\'app desktop : pilule et points', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+  const ctxSvg = async () => {
+    const band = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+    const ctx = (await band.findAll({ type: 'Svg' })).find(found => found.props.alt === 'Ctx : 62 % restant')
+
+    return String(ctx?.props.source)
+  }
+
+  await pane.press({ key: 'onglet-style' })
+  await pane.select({ key: 'shape', value: 'pill' })
+  expect((await ctxSvg()).match(/<rect/g)?.length).toBe(2)
+
+  await pane.select({ key: 'shape', value: 'dots' })
+  await pane.select({ key: 'size', value: 'large' })
+  expect((await ctxSvg()).match(/<circle[^>]*r="6"/g)?.length).toBe(10)
+})
+
+test('libellés longs, % consommé et coût en euros', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  await pane.select({ key: 'labels', value: 'long' })
+  await pane.select({ key: 'currency', value: 'eur' })
+  await pane.press({ key: 'onglet-style' })
+  await pane.select({ key: 'percent', value: 'used' })
+  const text = await shown($)
+
+  expect(text).toContain('Contexte▰▰▰▰▰▰▱▱▱▱38 %')
+  expect(text).toContain('5 heures')
+  expect(text).toContain('Session ≈ 1,69 €')
+})
+
+test('séparateur en barre, et Pixel à gauche, bleu et grand', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  await pane.select({ key: 'separator', value: 'bar' })
+  expect(await texts(await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', component: 'AbovePrompt', props: PROPS }))).toContain('│')
+
+  await pane.press({ key: 'onglet-pixel' })
+  await pane.select({ key: 'pixelSide', value: 'left' })
+  await pane.select({ key: 'pixelColor', value: '#60a5fa' })
+  await pane.select({ key: 'pixelSize', value: 'large' })
+  const band = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  const svgs = await band.findAll({ type: 'Svg' })
+  const pixel = svgs.find(found => String(found.props.alt).startsWith('Mascotte'))
+
+  expect(svgs[0]).toBe(pixel)
+  expect(pixel?.props.width).toBe(83)
+  expect(String(pixel?.props.source)).toContain('#60a5fa')
+})
+
+test('on peut couper les réactions de Pixel au clic', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+  await pane.press({ key: 'onglet-pixel' })
+  await pane.press({ key: 'reaction-click' })
+
+  const band = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  await band.pointer(CLICK)
+
+  expect((await texts(band)).join('')).toContain('(•ᴗ•)')
+})
+
+test('alertes : une notification par seuil franchi', async ($, on) => {
+  const clock = world(on)
+  const toasts: string[] = []
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  const tight = {
+    context: { window: 200_000, tokens: 170_000, percent: 85 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 92, resetsAt: at(62) }],
+    cost: { usd: 1.84 },
+    changed: ['context', 'rateLimits', 'cost'] as Array<'context' | 'rateLimits' | 'cost'>,
+  }
+
+  await $.session.measure(tight)
+  await clock.advance(1)
+  await $.session.measure(tight)
+  await clock.advance(1)
+
+  expect(toasts).toEqual([
+    '⚠ Limite 5 h à 92 % · reset dans 1 h 02',
+    '⚠ Contexte presque plein : 15 % libre. Pense à /compact.',
+  ])
+})
+
+test('alertes : prévient quand une boucle est arrêtée', async ($, on) => {
+  const clock = world(on)
+  tools(on)
+  const toasts: string[] = []
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await measure($)
+
+  await $.tool.call({ tool: 'CronCreate', cron: '*/5 * * * *', prompt: '/babysit-prs', recurring: true })
+  await $.prompt.submit({ text: '/babysit-prs', wait: false, origin: { kind: 'scheduled-trigger' } })
+  await $.tool.call({ tool: 'CronDelete', id: 'c1' })
+  await clock.advance(1)
+
+  expect(toasts).toEqual(['⟳ Boucle terminée : /babysit-prs (1 passage)'])
+})
+
+async function layoutText($: Engine): Promise<string> {
+  return (await $.command.run({ ...COMMAND, args: 'aide' })).text ?? ''
+}
+
+test('les flèches changent l\'ordre, et passent à la ligne voisine au bord', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  await pane.press({ key: 'bloc-limite7j' })
+  await pane.press({ key: 'action-gauche' })
+  let text = await shown($)
+  expect(text.indexOf('7 j')).toBeLessThan(text.indexOf('5 h'))
+
+  await pane.press({ key: 'bloc-contexte' })
+  await pane.press({ key: 'action-gauche' })
+  expect(await layoutText($)).toContain('Ligne 1 : Modèle · Projet et branche · État git · Durée · Coût · Outils et fichiers · Contexte')
+
+  await pane.press({ key: 'action-droite' })
+  text = await layoutText($)
+  expect(text).toContain('Ligne 2 : Contexte · Limite 7 j · Limite 5 h · Autres limites')
+})
+
+test('chaque bloc se place sur la ligne voulue, et tout se range d\'un coup', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  await pane.press({ key: 'bloc-limite7j' })
+  await pane.press({ key: 'action-descendre' })
+  expect(await layoutText($)).toContain('Ligne 3 : Boucles et réveils · Tâches · Arrière-plan · Limite 7 j')
+
+  await pane.press({ key: 'ranger-1' })
+  const text = await layoutText($)
+  expect(text).toContain('Ligne 1 : Modèle · Projet et branche · État git · Durée · Coût · Outils et fichiers · Contexte · Limite 5 h')
+  expect(text).toContain('Ligne 2 : (vide)')
+
+  await pane.press({ key: 'ranger-3' })
+  expect(await layoutText($)).toContain('Ligne 2 : Contexte · Limite 5 h · Autres limites · Limite 7 j')
+})
+
+test('un bloc masqué dans le panneau revient avec /bandeau afficher', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  await pane.press({ key: 'bloc-cout' })
+  await pane.press({ key: 'action-masquer' })
+  expect(await shown($)).not.toContain('1,84 $')
+
+  await $.command.run({ ...COMMAND, args: 'afficher cout' })
+  expect(await shown($)).toContain('1,84 $')
+  expect(await layoutText($)).toContain('Ligne 1 : Modèle · Projet et branche · État git · Durée · Outils et fichiers · Coût')
+})
+
+test('les onglets n\'affichent qu\'une partie des réglages à la fois', async ($, on) => {
+  world(on)
+  await measure($)
+  const pane = await mountPane($)
+
+  expect(await pane.find({ key: 'bloc-cout' })).toBeDefined()
+  expect(await pane.find({ key: 'shape' })).toBeUndefined()
+  expect((await pane.find({ key: 'onglet-disposition' }))?.props.variant).toBe('primary')
+
+  await pane.press({ key: 'onglet-style' })
+  expect(await pane.find({ key: 'shape' })).toBeDefined()
+  expect(await pane.find({ key: 'bloc-cout' })).toBeUndefined()
+
+  await pane.press({ key: 'onglet-alertes' })
+  expect(await pane.find({ key: 'alertLimitAt' })).toBeDefined()
+  expect(await pane.find({ key: 'shape' })).toBeUndefined()
 })

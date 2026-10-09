@@ -252,12 +252,30 @@ function blush(mood: Mood): string {
   ).join('')
 }
 
-export function mascotSvg(mood: Mood): string {
+/** La couleur un peu plus sombre des pattes. */
+function shade(hex: string): string {
+  const rgb = /^#([0-9a-f]{6})$/i.exec(hex)?.[1]
+  if (rgb === undefined) return SHADE
+  const n = parseInt(rgb, 16)
+  const dark = [16, 8, 0].map(bits => Math.round(((n >> bits) & 255) * 0.86))
+
+  return `#${dark.map(c => c.toString(16).padStart(2, '0')).join('')}`
+}
+
+export type MascotLook = { color?: string; scale?: number }
+
+export function mascotSvg(mood: Mood, { color = BODY, scale = 1 }: MascotLook = {}): string {
+  const svg = drawMascot(mood, Math.round(MASCOT_WIDTH * scale), Math.round(MASCOT_HEIGHT * scale))
+
+  return color.toLowerCase() === BODY.toLowerCase() ? svg : svg.replaceAll(BODY, color).replaceAll(SHADE, shade(color))
+}
+
+function drawMascot(mood: Mood, width: number, height: number): string {
   const look = MOODS[mood]
   const face = look.face === 'normal' ? `<g class="blink">${eyes('normal')}</g>` : eyes(look.face)
 
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${MASCOT_WIDTH}" height="${MASCOT_HEIGHT}" viewBox="0 0 ${MASCOT_WIDTH} ${MASCOT_HEIGHT}">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${MASCOT_WIDTH} ${MASCOT_HEIGHT}">` +
     `<title>Pixel ${look.label}</title><style>${CSS}</style>` +
     prop(mood) +
     `<g class="${look.anim}">${pixel(mood === 'hello')}${face}${blush(mood)}${mouth(look.mouth)}</g>` +

@@ -40,7 +40,7 @@ Puis `/reload-plugins` dans ta session, ou ouvre-en une nouvelle.
 
 | Commande | Effet |
 | --- | --- |
-| `/bandeau` | Ouvre le panneau de réglages, avec un aperçu qui change en direct |
+| `/bandeau` | Ouvre le panneau de réglages, avec un aperçu qui change en direct et des profils rapides |
 | `/bandeau aide` | Montre ce qui est affiché ou masqué |
 | `/bandeau masquer` / `/bandeau afficher` | Cache ou remet tout le bandeau |
 | `/bandeau masquer cout outils` | Cache une ou plusieurs infos |
@@ -51,7 +51,12 @@ Infos possibles : `modele`, `projet`, `branche`, `git`, `duree`, `cout`, `outils
 
 ### Personnaliser
 
-Le plus simple : `/bandeau` ouvre un panneau où tu choisis les infos affichées, les couleurs des jauges, le nombre de segments, les seuils orange et rouge, et le comportement de Pixel. Chaque changement s'applique tout de suite et reste enregistré.
+Le plus simple : `/bandeau` ouvre un panneau, avec l'aperçu du bandeau en haut, des profils rapides (Complet, Équilibré, Minimal, Focus) et quatre onglets. Chaque changement s'applique tout de suite et reste enregistré.
+
+- **Disposition** : les trois lignes du bandeau en pastilles. Clique sur un bloc puis ◀ ▶ pour changer son ordre, ▲ ▼ pour le changer de ligne, ou Masquer ; « Tout ranger sur 1, 2 ou 3 lignes » ; détails (branche, temps avant reset, outils, fichiers), séparateur, libellés courts ou longs, coût en $ ou en € ;
+- **Style** : forme des jauges (carrés, pilule, points, traits), taille, nombre de segments, % restant ou consommé, seuils orange et rouge, palette, couleur d'accent ;
+- **Pixel** : affiché ou non, couleur, taille, côté, ce à quoi il réagit (clic, mercis, commits, erreurs), durée de ses réactions, délai avant qu'il s'endorme ;
+- **Alertes** : une notification quand une limite dépasse 75 ou 90 %, quand le contexte passe sous 20 ou 10 % libre, ou quand une boucle s'arrête.
 
 Pour aller plus loin, tout est en haut de [`usage-band/hooks/register.tsx`](usage-band/hooks/register.tsx) : infos affichées par défaut (`DEFAULT_SHOW`), nombre et taille des segments, couleurs, seuils orange et rouge, réglages de Pixel (`SETTINGS`), ce que fait Pixel pour chaque outil (`TOOL_MOODS`) et quand on clique dessus (`POKE_MOODS`). Le dessin de Pixel est dans [`usage-band/hooks/mascot.ts`](usage-band/hooks/mascot.ts).
 

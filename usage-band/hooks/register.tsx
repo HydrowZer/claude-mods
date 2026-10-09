@@ -15,6 +15,7 @@ import type {
 
 import type {
   Activity,
+  BlockId,
   CronJob,
   GitState,
   Info,
@@ -22,6 +23,7 @@ import type {
   Limit,
   Mascot,
   Mood,
+  PanelTab,
   Prefs,
   Schedule,
   StyleOverrides,
@@ -63,9 +65,6 @@ const SETTINGS = {
   segment: { width: 6, height: 9, gap: 2, radius: 1.5 },
   /** Opacité des segments vides dans l'app desktop (0 à 1). */
   trackOpacity: 0.3,
-  /** Segments dans le terminal, où le dessin n'existe pas : plein, vide. */
-  full: '▰',
-  empty: '▱',
   /** % consommé à partir duquel une jauge passe en orange, puis en rouge. */
   warnAt: 70,
   alertAt: 90,
@@ -89,7 +88,10 @@ const SETTINGS = {
     tasks: '#a78bfa',
   },
   /** Noms courts des limites. */
-  limitLabels: { five_hour: '5 h', seven_day: '7 j', spend_limit: 'Plafond' } as Record<string, string>,
+  limitLabels: { contexte: 'Ctx', five_hour: '5 h', seven_day: '7 j', spend_limit: 'Plafond' } as Record<string, string>,
+  longLabels: { contexte: 'Contexte', five_hour: '5 heures', seven_day: '7 jours', spend_limit: 'Plafond' } as Record<string, string>,
+  /** Taux utilisé quand le coût est affiché en euros (à ajuster). */
+  eurPerUsd: 0.92,
   mascot: {
     /** Couleur du visage dans le terminal. */
     color: '#D97757',
@@ -113,18 +115,37 @@ const PALETTES: Record<string, { label: string; ok: string; warn: string; alert:
   neon: { label: 'Néon', ok: '#22d3ee', warn: '#facc15', alert: '#e879f9' },
   pastel: { label: 'Pastel', ok: '#86efac', warn: '#fcd34d', alert: '#fca5a5' },
   sobre: { label: 'Sobre', ok: '#d4d4d8', warn: '#a1a1aa', alert: '#f87171' },
+  sunset: { label: 'Coucher de soleil', ok: '#fbbf24', warn: '#fb7185', alert: '#e11d48' },
 }
 
-type Style = {
-  segments: number
-  warnAt: number
-  alertAt: number
+/** Couleurs d'accent (modèle, tâches) et de Pixel au choix dans le panneau. */
+const ACCENTS: Record<string, string> = {
+  '#a78bfa': 'Violet',
+  '#7cc4ff': 'Bleu',
+  '#4ade80': 'Vert',
+  '#fb923c': 'Orange',
+  '#f472b6': 'Rose',
+}
+const PIXEL_COLORS: Record<string, string> = {
+  '#D97757': 'Orange Claude',
+  '#60a5fa': 'Bleu',
+  '#4ade80': 'Vert',
+  '#a78bfa': 'Violet',
+  '#f472b6': 'Rose',
+  '#a1a1aa': 'Gris',
+}
+
+const SIZES = { small: 6, medium: 9, large: 12 } as const
+const PIXEL_SCALES = { small: 0.75, normal: 1, large: 1.3 } as const
+/** Segments dans le terminal, où le dessin n'existe pas : plein, vide. */
+const GLYPHS = { squares: ['▰', '▱'], pill: ['━', '─'], dots: ['●', '○'], thin: ['▪', '▫'] } as const
+
+type Style = Required<Omit<StyleOverrides, 'reactions' | 'palette'>> & {
   palette: string
   ok: string
   warn: string
   alert: string
-  flashSeconds: number
-  sleepAfterMinutes: number
+  reactions: { click: boolean; thanks: boolean; party: boolean; errors: boolean }
 }
 
 function resolveStyle(o: StyleOverrides | undefined): Style {
@@ -132,20 +153,225 @@ function resolveStyle(o: StyleOverrides | undefined): Style {
   const colors = PALETTES[palette] ?? { ok: SETTINGS.colors.ok, warn: SETTINGS.colors.warn, alert: SETTINGS.colors.alert }
 
   return {
+    separator: o?.separator ?? 'dot',
+    labels: o?.labels ?? 'short',
+    currency: o?.currency ?? 'usd',
+    shape: o?.shape ?? 'squares',
     segments: o?.segments ?? SETTINGS.segments,
+    size: o?.size ?? 'medium',
+    percent: o?.percent ?? 'left',
     warnAt: o?.warnAt ?? SETTINGS.warnAt,
     alertAt: o?.alertAt ?? SETTINGS.alertAt,
     palette,
     ok: colors.ok,
     warn: colors.warn,
     alert: colors.alert,
+    accent: o?.accent ?? SETTINGS.colors.model,
+    costAccent: o?.costAccent ?? false,
+    pixelColor: o?.pixelColor ?? SETTINGS.mascot.color,
+    pixelSize: o?.pixelSize ?? 'normal',
+    pixelSide: o?.pixelSide ?? 'right',
+    reactions: { click: true, thanks: true, party: true, errors: true, ...o?.reactions },
     flashSeconds: o?.flashSeconds ?? SETTINGS.mascot.flashSeconds,
     sleepAfterMinutes: o?.sleepAfterMinutes ?? SETTINGS.mascot.sleepAfterMinutes,
+    alertLimitAt: o?.alertLimitAt ?? 90,
+    alertContextBelow: o?.alertContextBelow ?? 20,
+    alertLoopEnd: o?.alertLoopEnd ?? true,
   }
 }
 
 /** Les réglages en vigueur : ceux du code, corrigés par ceux du panneau. */
 let style = resolveStyle(undefined)
+
+/** Les blocs du bandeau, dans l'ordre où le panneau les propose. */
+const BLOCKS: BlockId[] = [
+  'etat',
+  'modele',
+  'projet',
+  'git',
+  'duree',
+  'cout',
+  'activite',
+  'contexte',
+  'limite5h',
+  'limite7j',
+  'autres',
+  'boucles',
+  'taches',
+  'arriereplan',
+]
+
+const BLOCK_LABELS: Record<BlockId, string> = {
+  etat: 'État (● en cours)',
+  modele: 'Modèle',
+  projet: 'Projet et branche',
+  git: 'État git',
+  duree: 'Durée',
+  cout: 'Coût',
+  activite: 'Outils et fichiers',
+  contexte: 'Contexte',
+  limite5h: 'Limite 5 h',
+  limite7j: 'Limite 7 j',
+  autres: 'Autres limites',
+  boucles: 'Boucles et réveils',
+  taches: 'Tâches',
+  arriereplan: 'Arrière-plan',
+}
+
+/** Les noms courts des blocs, sur les pastilles du panneau. */
+const BLOCK_CHIPS: Record<BlockId, string> = {
+  etat: 'État',
+  modele: 'Modèle',
+  projet: 'Projet',
+  git: 'Git',
+  duree: 'Durée',
+  cout: 'Coût',
+  activite: 'Outils',
+  contexte: 'Contexte',
+  limite5h: '5 h',
+  limite7j: '7 j',
+  autres: 'Autres limites',
+  boucles: 'Boucles',
+  taches: 'Tâches',
+  arriereplan: 'Arrière-plan',
+}
+
+const TABS: Array<[PanelTab, string]> = [
+  ['disposition', 'Disposition'],
+  ['style', 'Style'],
+  ['pixel', 'Pixel'],
+  ['alertes', 'Alertes'],
+]
+
+/** Les infos qu'un bloc affiche : le placer sur une ligne les réactive. */
+const BLOCK_KEYS: Record<BlockId, InfoKey[]> = {
+  etat: ['etat'],
+  modele: ['modele'],
+  projet: ['projet'],
+  git: ['git'],
+  duree: ['duree'],
+  cout: ['cout'],
+  activite: ['outils', 'fichiers'],
+  contexte: ['contexte'],
+  limite5h: ['limites'],
+  limite7j: ['limites'],
+  autres: ['limites'],
+  boucles: ['boucles'],
+  taches: ['taches'],
+  arriereplan: ['arriereplan'],
+}
+
+const INFO_BLOCKS: BlockId[] = ['etat', 'modele', 'projet', 'git', 'duree', 'cout', 'activite']
+const GAUGE_BLOCKS: BlockId[] = ['contexte', 'limite5h', 'limite7j', 'autres']
+
+const DEFAULT_LAYOUT: BlockId[][] = [
+  ['modele', 'projet', 'git', 'duree', 'cout', 'activite'],
+  ['contexte', 'limite5h', 'limite7j', 'autres'],
+  ['boucles', 'taches', 'arriereplan'],
+]
+
+/** La disposition enregistrée, nettoyée : trois lignes, chaque bloc une fois au plus. */
+function resolveLayout(p: Prefs): BlockId[][] {
+  const seen = new Set<BlockId>()
+  const source = Array.isArray(p.layout) ? p.layout : DEFAULT_LAYOUT
+  const lines = [0, 1, 2].map(n =>
+    (source[n] ?? []).filter((block): block is BlockId => {
+      if (!BLOCKS.includes(block) || seen.has(block)) return false
+      seen.add(block)
+
+      return true
+    }),
+  )
+  if (!Array.isArray(p.layout) && p.overrides.etat === true) lines[0]?.unshift('etat')
+
+  return lines
+}
+
+function lineOf(layout: BlockId[][], block: BlockId): number {
+  return layout.findIndex(line => line.includes(block)) + 1
+}
+
+/** Place un bloc au bout d'une ligne (1 à 3), ou le masque (0). */
+function setLine(layout: BlockId[][], block: BlockId, line: number): BlockId[][] {
+  const next = layout.map(blocks => blocks.filter(b => b !== block))
+  if (line >= 1 && line <= 3) next[line - 1]?.push(block)
+
+  return next
+}
+
+/** Avance ou recule un bloc ; au bord d'une ligne, il passe à la ligne voisine. */
+function moveBlock(layout: BlockId[][], block: BlockId, delta: -1 | 1): BlockId[][] {
+  const next = layout.map(blocks => [...blocks])
+  const line = next.findIndex(blocks => blocks.includes(block))
+  const blocks = next[line]
+  if (line < 0 || blocks === undefined) return layout
+
+  const at = blocks.indexOf(block)
+  const to = at + delta
+  if (to >= 0 && to < blocks.length) {
+    blocks.splice(at, 1)
+    blocks.splice(to, 0, block)
+
+    return next
+  }
+
+  const target = next[line + delta]
+  if (target === undefined) return layout
+  blocks.splice(at, 1)
+  if (delta < 0) target.push(block)
+  else target.unshift(block)
+
+  return next
+}
+
+/** Range les blocs affichés sur 1, 2 ou 3 lignes, en gardant leur ordre. */
+function arrange(layout: BlockId[][], lines: 1 | 2 | 3): BlockId[][] {
+  const all = layout.flat()
+  if (lines === 1) return [all, [], []]
+  if (lines === 2) return [all.filter(b => INFO_BLOCKS.includes(b)), all.filter(b => !INFO_BLOCKS.includes(b)), []]
+
+  return [
+    all.filter(b => INFO_BLOCKS.includes(b)),
+    all.filter(b => GAUGE_BLOCKS.includes(b)),
+    all.filter(b => !INFO_BLOCKS.includes(b) && !GAUGE_BLOCKS.includes(b)),
+  ]
+}
+
+/** Les profils rapides du panneau : réglages, disposition et détails affichés, en un clic. */
+const PROFILES: Record<string, { label: string; style: StyleOverrides; layout: BlockId[][]; details: InfoKey[] }> = {
+  complet: {
+    label: 'Complet',
+    style: { shape: 'squares', segments: 10, size: 'medium', pixelSize: 'normal' },
+    layout: DEFAULT_LAYOUT,
+    details: ['branche', 'reset', 'outils', 'fichiers'],
+  },
+  equilibre: {
+    label: 'Équilibré',
+    style: { shape: 'pill', segments: 10, size: 'medium', pixelSize: 'normal' },
+    layout: [['modele', 'projet', 'cout'], ['contexte', 'limite5h', 'limite7j', 'boucles', 'taches'], []],
+    details: ['reset'],
+  },
+  minimal: {
+    label: 'Minimal',
+    style: { shape: 'dots', segments: 8, size: 'small', pixelSize: 'small' },
+    layout: [['cout', 'contexte', 'limite5h', 'limite7j'], [], []],
+    details: [],
+  },
+  focus: {
+    label: 'Focus',
+    style: { shape: 'thin', segments: 12, size: 'medium', pixelSize: 'normal' },
+    layout: [['contexte', 'limite5h', 'limite7j'], [], []],
+    details: ['reset'],
+  },
+}
+
+/** Les réglages fins qui ne sont pas des blocs : ce qu'un bloc montre en plus. */
+const DETAILS: Array<[InfoKey, string]> = [
+  ['branche', 'Branche git'],
+  ['reset', 'Temps avant reset'],
+  ['outils', "Nombre d'outils"],
+  ['fichiers', 'Fichiers modifiés'],
+]
 
 /** Ce que fait Pixel quand on clique dessus, à tour de rôle. */
 const POKE_MOODS: Mood[] = ['giggle', 'boing', 'surprise', 'love']
@@ -235,6 +461,8 @@ const schedule = atom({ plugin: 'usage-band', key: 'schedule' } as const, {
   tasks: [],
   background: [],
 })
+const alerts = atom({ plugin: 'usage-band', key: 'alerts' } as const, [])
+const panel = atom({ plugin: 'usage-band', key: 'panel' } as const, { tab: 'disposition', selected: null })
 const tick = atom({ plugin: 'usage-band', key: 'tick' } as const, 0)
 
 let lastGitAt = 0
@@ -264,13 +492,13 @@ const ALIASES: Record<string, InfoKey> = {
 const EDITORS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 
 type Span = { text: string; color?: string; bold?: boolean; dim?: boolean }
-type Meter = { filled: number; color: string; alt: string }
+type Meter = { ratio: number; color: string; alt: string }
 type Part = Span | Meter
-type Chunk = { key: string; gap: number; full: Part[]; short: Part[] }
+type Chunk = { key: string; gap: number; full: Part[]; short: Part[]; block?: BlockId }
 
 const dim = (text: string): Span => ({ text, dim: true })
 const same = (key: string, parts: Part[]): Chunk => ({ key, gap: 0, full: parts, short: parts })
-const isMeter = (part: Part): part is Meter => 'filled' in part
+const isMeter = (part: Part): part is Meter => 'ratio' in part
 
 function normalize(text: string): string {
   return text
@@ -327,7 +555,10 @@ function plural(n: number, word: string): string {
 }
 
 function money(usd: number): string {
-  return `${usd.toFixed(2).replace('.', ',')} $`
+  const isEuro = style.currency === 'eur'
+  const amount = isEuro ? usd * SETTINGS.eurPerUsd : usd
+
+  return `${amount.toFixed(2).replace('.', ',')} ${isEuro ? '€' : '$'}`
 }
 
 function pct(left: number): string {
@@ -350,27 +581,61 @@ function toneFor(used: number): string {
 function gauge(key: string, label: string, used: number, tail: string | null): Chunk {
   const color = toneFor(used)
   const left = Math.min(100, Math.max(0, 100 - used))
-  const filled = Math.round((left / 100) * style.segments)
+  const shown = style.percent === 'used' ? 100 - left : left
   const parts: Part[] = [
     dim(label),
-    { filled, color, alt: `${label} : ${pct(left)} restant` },
-    { text: pct(left), bold: true, color },
+    { ratio: left / 100, color, alt: `${label} : ${pct(left)} restant` },
+    { text: pct(shown), bold: true, color },
     ...(tail ? [dim(tail)] : []),
   ]
 
   return { key, gap: 1, full: parts, short: parts }
 }
 
-function meterSvg({ filled, color }: Meter): string {
-  const { width, height, gap, radius } = SETTINGS.segment
-  const total = style.segments * width + (style.segments - 1) * gap
-  const rects = Array.from({ length: style.segments }, (_, i) => {
-    const fill = i < filled ? `fill="${color}"` : `fill="${SETTINGS.colors.track}" fill-opacity="${SETTINGS.trackOpacity}"`
+/** Le nom d'une jauge, court ou long selon le réglage. */
+function gaugeLabel(kind: string): string {
+  const names = style.labels === 'long' ? SETTINGS.longLabels : SETTINGS.limitLabels
 
-    return `<rect x="${i * (width + gap)}" y="0" width="${width}" height="${height}" rx="${radius}" ${fill}/>`
-  })
+  return names[kind] ?? kind
+}
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${total}" height="${height}" viewBox="0 0 ${total} ${height}">${rects.join('')}</svg>`
+function meterWidth(): number {
+  const height = SIZES[style.size]
+  if (style.shape === 'dots') return style.segments * (height + 2) - 2
+
+  return style.segments * (SETTINGS.segment.width + SETTINGS.segment.gap) - SETTINGS.segment.gap
+}
+
+function filledSegments(meter: Meter): number {
+  return Math.round(meter.ratio * style.segments)
+}
+
+function meterSvg(meter: Meter): string {
+  const { width, gap, radius } = SETTINGS.segment
+  const height = SIZES[style.size]
+  const total = meterWidth()
+  const track = `fill="${SETTINGS.colors.track}" fill-opacity="${SETTINGS.trackOpacity}"`
+  const lit = `fill="${meter.color}"`
+  const filled = filledSegments(meter)
+  let body = ''
+
+  if (style.shape === 'pill') {
+    const r = height / 2
+    const length = Math.round(total * meter.ratio)
+    body = `<rect width="${total}" height="${height}" rx="${r}" ${track}/>` + (length > 0 ? `<rect width="${Math.max(length, height)}" height="${height}" rx="${r}" ${lit}/>` : '')
+  } else if (style.shape === 'dots') {
+    const r = height / 2
+    body = Array.from({ length: style.segments }, (_, i) => `<circle cx="${i * (height + 2) + r}" cy="${r}" r="${r}" ${i < filled ? lit : track}/>`).join('')
+  } else {
+    const h = style.shape === 'thin' ? 3 : height
+    const y = (height - h) / 2
+    body = Array.from(
+      { length: style.segments },
+      (_, i) => `<rect x="${i * (width + gap)}" y="${y}" width="${width}" height="${h}" rx="${Math.min(radius, h / 2)}" ${i < filled ? lit : track}/>`,
+    ).join('')
+  }
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${total}" height="${height}" viewBox="0 0 ${total} ${height}">${body}</svg>`
 }
 
 function toUsage(
@@ -572,6 +837,40 @@ function scheduleAfter(s: Schedule, e: Call, result: unknown): Schedule {
   }
 }
 
+/** Une notification par seuil franchi ; elle se réarme quand on repasse en dessous. */
+async function checkAlerts($: EngineInterface, u: Usage, now: number): Promise<void> {
+  const sent = (await read($, alerts)) ?? []
+  const active: string[] = []
+  const toasts: string[] = []
+
+  if (style.alertLimitAt > 0) {
+    for (const limit of u.limits) {
+      if (limit.percentUsed < style.alertLimitAt) continue
+      const key = `limite:${limit.kind}:${limit.resetsAt ?? ''}`
+      active.push(key)
+      if (sent.includes(key)) continue
+      const reset = untilReset(limit.resetsAt, now)
+      toasts.push(`Limite ${gaugeLabel(limit.kind)} à ${Math.round(limit.percentUsed)} %${reset ? ` · reset dans ${reset}` : ''}`)
+    }
+  }
+  if (style.alertContextBelow > 0 && u.contextPercent != null && 100 - u.contextPercent < style.alertContextBelow) {
+    active.push('contexte')
+    if (!sent.includes('contexte')) {
+      toasts.push(`Contexte presque plein : ${Math.round(100 - u.contextPercent)} % libre. Pense à /compact.`)
+    }
+  }
+
+  await update($, alerts, () => active)
+  for (const text of toasts) $.ui.toast(`⚠ ${text}`)
+}
+
+/** Prévient quand une boucle s'arrête, si l'alerte est activée. */
+function loopEnded($: EngineInterface, s: Schedule, prompt: string): void {
+  if (!style.alertLoopEnd) return
+  const n = s.fires?.[prompt] ?? 0
+  $.ui.toast(`⟳ Boucle terminée : ${loopLabel(prompt)}${n > 0 ? ` (${n} passage${n > 1 ? 's' : ''})` : ''}`)
+}
+
 function moodFor(m: Mascot, isWorking: boolean, u: Usage | null, now: number): Mood {
   const running = Object.values(m.running)
   const tool = running[running.length - 1]
@@ -641,7 +940,7 @@ function topChunks(
     out.push(same('etat', isWorking ? [{ text: '● en cours', color: colors.working }] : [dim('● prêt')]))
   }
   if (show.modele && i.model) {
-    out.push(same('modele', [{ text: i.model, color: colors.model }]))
+    out.push(same('modele', [{ text: i.model, color: style.accent }]))
   }
 
   const project = show.projet ? i.project : null
@@ -672,7 +971,7 @@ function topChunks(
     out.push(same('duree', [dim(minutes(Math.floor((now - u.startedAt) / 60_000)))]))
   }
   if (show.cout && u?.costUsd != null) {
-    const value = { text: money(u.costUsd), bold: true }
+    const value: Span = { text: money(u.costUsd), bold: true, ...(style.costAccent ? { color: style.accent } : {}) }
     out.push({ key: 'cout', gap: 0, full: [dim('Session ≈ '), value], short: [dim('≈ '), value] })
   }
 
@@ -692,13 +991,14 @@ function gaugeChunks(show: Record<InfoKey, boolean>, u: Usage | null, now: numbe
   const out: Chunk[] = []
 
   if (show.contexte && u.contextPercent != null) {
-    out.push(gauge('contexte', 'Ctx', u.contextPercent, null))
+    out.push(gauge('contexte', gaugeLabel('contexte'), u.contextPercent, null))
   }
   if (show.limites) {
     for (const limit of u.limits) {
-      const label = SETTINGS.limitLabels[limit.kind] ?? limit.kind
+      const label = gaugeLabel(limit.kind)
       const reset = show.reset ? untilReset(limit.resetsAt, now) : null
-      out.push(gauge(limit.kind, label, limit.percentUsed, reset ? `· ${reset}` : null))
+      const block: BlockId = limit.kind === 'five_hour' ? 'limite5h' : limit.kind === 'seven_day' ? 'limite7j' : 'autres'
+      out.push({ ...gauge(limit.kind, label, limit.percentUsed, reset ? `· ${reset}` : null), block })
     }
   }
 
@@ -725,7 +1025,7 @@ function scheduleChunks(show: Record<InfoKey, boolean>, s: Schedule, now: number
         ...(at === null ? [] : [{ text: until(at - now), color: colors.loop }]),
         ...fires(job.prompt),
       ]
-      out.push({ key: `cron-${job.id}`, gap: 1, full: parts, short: parts.filter((_, i) => i !== 2) })
+      out.push({ key: `cron-${job.id}`, gap: 1, full: parts, short: parts.filter((_, i) => i !== 2), block: 'boucles' })
     }
 
     const wakeup = s.wakeup
@@ -737,7 +1037,7 @@ function scheduleChunks(show: Record<InfoKey, boolean>, s: Schedule, now: number
         ...fires(wakeup.prompt),
         ...(wakeup.reason ? [dim(`· ${shorten(wakeup.reason, 40)}`)] : []),
       ]
-      out.push({ key: 'reveil', gap: 1, full: parts, short: parts.slice(0, 4) })
+      out.push({ key: 'reveil', gap: 1, full: parts, short: parts.slice(0, 4), block: 'boucles' })
     }
   }
 
@@ -745,11 +1045,10 @@ function scheduleChunks(show: Record<InfoKey, boolean>, s: Schedule, now: number
   if (show.taches && tasks.some(task => task.status !== 'completed')) {
     const done = tasks.filter(task => task.status === 'completed').length
     const current = tasks.find(task => task.status === 'in_progress')
-    const filled = Math.round((done / tasks.length) * style.segments)
     const parts: Part[] = [
       dim('Tâches'),
-      { filled, color: colors.tasks, alt: `Tâches : ${done} sur ${tasks.length}` },
-      { text: `${done}/${tasks.length}`, bold: true, color: colors.tasks },
+      { ratio: done / tasks.length, color: style.accent, alt: `Tâches : ${done} sur ${tasks.length}` },
+      { text: `${done}/${tasks.length}`, bold: true, color: style.accent },
       ...(current ? [dim(`· ${shorten(current.activeForm ?? current.subject, 40)}`)] : []),
     ]
     out.push({ key: 'taches', gap: 1, full: parts, short: parts.slice(0, 3) })
@@ -772,8 +1071,9 @@ function lineWidth(chunks: Chunk[]): number {
       chunk.full.reduce((m, part) => m + (isMeter(part) ? style.segments : [...part.text].length), 0),
     0,
   )
+  const between = style.separator === 'space' ? SETTINGS.gap : 3
 
-  return cells + SETTINGS.gap * Math.max(0, chunks.length - 1)
+  return cells + between * Math.max(0, chunks.length - 1)
 }
 
 function textProps(span: Span): TextProps {
@@ -814,32 +1114,40 @@ type BandView = {
   columns: number
   /** L'aperçu du panneau : pas de zone tactile sur Pixel. */
   isPreview: boolean
+  layout: BlockId[][]
 }
 
 /** Le bandeau dessiné, pour le vrai bandeau comme pour l'aperçu du panneau. */
 function drawBand({ Box, Text, Svg, Client }: Els, v: BandView): RenderElement | null {
   const mood = v.show.mascotte ? moodFor(v.m, v.isWorking, v.u, v.now) : null
-  const lines = [
-    { key: 'infos', chunks: topChunks(v.show, v.u, v.i, v.a, v.now, v.isWorking) },
-    { key: 'jauges', chunks: gaugeChunks(v.show, v.u, v.now) },
-    { key: 'programme', chunks: scheduleChunks(v.show, v.s, v.now) },
-  ].filter(line => line.chunks.length > 0)
+  const byBlock = new Map<string, Chunk[]>()
+  for (const chunk of [
+    ...topChunks(v.show, v.u, v.i, v.a, v.now, v.isWorking),
+    ...gaugeChunks(v.show, v.u, v.now),
+    ...scheduleChunks(v.show, v.s, v.now),
+  ]) {
+    const block = chunk.block ?? chunk.key
+    byBlock.set(block, [...(byBlock.get(block) ?? []), chunk])
+  }
+  const lines = v.layout
+    .map((blocks, n) => ({ key: `ligne-${n}`, chunks: blocks.flatMap(block => byBlock.get(block) ?? []) }))
+    .filter(line => line.chunks.length > 0)
 
   if (lines.length === 0 && mood === null) return null
 
-  const { width, height, gap } = SETTINGS.segment
-  const meterWidth = style.segments * width + (style.segments - 1) * gap
-  const mascotCells = mood === null ? 0 : (Svg ? 10 : [...MOODS[mood].kao].length) + 2
+  const height = SIZES[style.size]
+  const scale = PIXEL_SCALES[style.pixelSize]
+  const mascotCells = mood === null ? 0 : (Svg ? Math.round(10 * scale) : [...MOODS[mood].kao].length) + 2
   const room = v.columns - mascotCells
+  const [full, empty] = GLYPHS[style.shape]
 
   const drawMeter = (meter: Meter) => {
-    if (Svg) {
-      return <Svg source={meterSvg(meter)} alt={meter.alt} width={meterWidth} height={height} />
-    }
+    if (Svg) return <Svg source={meterSvg(meter)} alt={meter.alt} width={meterWidth()} height={height} />
 
+    const filled = filledSegments(meter)
     const glyphs = [
-      { text: SETTINGS.full.repeat(meter.filled), color: meter.color },
-      { text: SETTINGS.empty.repeat(style.segments - meter.filled), color: SETTINGS.colors.track, dim: true },
+      { text: full.repeat(filled), color: meter.color },
+      { text: empty.repeat(style.segments - filled), color: SETTINGS.colors.track, dim: true },
     ].filter(glyph => glyph.text !== '')
 
     return (
@@ -852,43 +1160,64 @@ function drawBand({ Box, Text, Svg, Client }: Els, v: BandView): RenderElement |
   }
 
   const draw = (part: Part) => (isMeter(part) ? drawMeter(part) : <Text {...textProps(part)}>{part.text}</Text>)
+  const separator = style.separator === 'dot' ? '·' : style.separator === 'bar' ? '│' : null
+  const gap = separator === null ? SETTINGS.gap : 1
 
-  const drawMascot = (current: Mood) =>
-    Svg ? (
-      <Svg source={mascotSvg(current)} alt={`Mascotte : ${MOODS[current].label}`} width={MASCOT_WIDTH} height={MASCOT_HEIGHT} />
-    ) : (
-      <Text color={SETTINGS.mascot.color} bold>
-        {MOODS[current].kao}
-      </Text>
+  const drawLine = (line: { key: string; chunks: Chunk[] }) => {
+    const isShort = lineWidth(line.chunks) > room
+    const items = line.chunks.flatMap((chunk, n) => {
+      const box = (
+        <Box key={`${line.key}-${chunk.key}`} flexDirection="row" alignItems="center" columnGap={chunk.gap}>
+          {(isShort ? chunk.short : chunk.full).filter(part => isMeter(part) || part.text !== '').map(draw)}
+        </Box>
+      )
+
+      return n > 0 && separator !== null
+        ? [
+            <Text key={`${line.key}-sep-${n}`} dimColor>
+              {separator}
+            </Text>,
+            box,
+          ]
+        : [box]
+    })
+
+    return (
+      <Box key={line.key} flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={gap}>
+        {items}
+      </Box>
     )
+  }
+
+  const pixel = mood !== null && (
+    <Box key="mascotte" flexShrink={0}>
+      {Svg ? (
+        <Svg
+          source={mascotSvg(mood, { color: style.pixelColor, scale })}
+          alt={`Mascotte : ${MOODS[mood].label}`}
+          width={Math.round(MASCOT_WIDTH * scale)}
+          height={Math.round(MASCOT_HEIGHT * scale)}
+        />
+      ) : (
+        <Text color={style.pixelColor} bold>
+          {MOODS[mood].kao}
+        </Text>
+      )}
+      {Client && !v.isPreview && (
+        <Box position="absolute" top={0} left={0} right={0} bottom={0}>
+          <Client key={TOUCH_KEY} module="./touch.ts" width="100%" height="100%" />
+        </Box>
+      )}
+    </Box>
+  )
 
   return (
     <Box flexDirection="row" alignItems="center" columnGap={2}>
+      {style.pixelSide === 'left' && pixel}
       <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-        {lines.map(line => {
-          const isShort = lineWidth(line.chunks) > room
-
-          return (
-            <Box key={line.key} flexDirection="row" flexWrap="wrap" columnGap={SETTINGS.gap}>
-              {line.chunks.map(chunk => (
-                <Box key={`${line.key}-${chunk.key}`} flexDirection="row" alignItems="center" columnGap={chunk.gap}>
-                  {(isShort ? chunk.short : chunk.full).filter(part => isMeter(part) || part.text !== '').map(draw)}
-                </Box>
-              ))}
-            </Box>
-          )
-        })}
+        {lines.map(drawLine)}
       </Box>
-      {mood !== null && (
-        <Box key="mascotte" flexShrink={0}>
-          {drawMascot(mood)}
-          {Client && !v.isPreview && (
-            <Box position="absolute" top={0} left={0} right={0} bottom={0}>
-              <Client key={TOUCH_KEY} module="./touch.ts" width="100%" height="100%" />
-            </Box>
-          )}
-        </Box>
-      )}
+      {style.pixelSide === 'right' && pixel}
     </Box>
   )
 }
@@ -896,9 +1225,13 @@ function drawBand({ Box, Text, Svg, Client }: Els, v: BandView): RenderElement |
 function describe(p: Prefs): string {
   const show = { ...DEFAULT_SHOW, ...p.overrides }
   const marks = KEYS.map(key => `${show[key] ? '✓' : '✗'} ${key}`).join('   ')
+  const lines = resolveLayout(p).map(
+    (blocks, n) => `Ligne ${n + 1} : ${blocks.length === 0 ? '(vide)' : blocks.map(block => BLOCK_LABELS[block]).join(' · ')}`,
+  )
 
   return [
     `Bandeau d'utilisation : ${p.isHidden ? 'masqué' : 'affiché'}`,
+    ...lines,
     marks,
     '',
     '/bandeau                                  ouvre le panneau de réglages',
@@ -932,7 +1265,7 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     void refresh($)
-    const isThanks = e.origin.kind === 'composer' && THANKS.test(normalize(e.text))
+    const isThanks = style.reactions.thanks && e.origin.kind === 'composer' && THANKS.test(normalize(e.text))
     await (isThanks ? flash($, 'love') : touch($))
 
     if (e.origin.kind === 'scheduled-trigger') {
@@ -956,7 +1289,7 @@ export const register: Register = on => {
     const m = await read($, mascot)
     const isPartying = m.flash?.mood === 'party' && m.flash.until > now
     await update($, mascot, (state): Mascot => ({ ...state, running: {} }))
-    if (e.reason === 'error') await flash($, 'error')
+    if (e.reason === 'error' && style.reactions.errors) await flash($, 'error')
     else if (e.reason === 'answer' && !isPartying) await flash($, 'done')
     else await touch($)
 
@@ -967,6 +1300,11 @@ export const register: Register = on => {
     const done = await next(e)
     const crons = e.session_crons ?? []
     const running = (e.background_tasks ?? []).filter(task => task.status === 'running' || task.status === 'pending')
+
+    const before = await read($, schedule)
+    for (const job of before.crons ?? []) {
+      if (job.recurring && !crons.some(kept => kept.id === job.id)) loopEnded($, before, job.prompt)
+    }
 
     await update($, schedule, (s): Schedule => {
       const known = new Map((s.crons ?? []).map(job => [job.id, job]))
@@ -986,6 +1324,8 @@ export const register: Register = on => {
 
   on('session.measure', async ($, e, next) => {
     await update($, usage, u => toUsage(e.rateLimits, e.cost, e.context, u?.startedAt ?? null))
+    const measured = await read($, usage)
+    if (measured) await checkAlerts($, measured, await $.clock.now())
 
     return next(e)
   })
@@ -1008,12 +1348,20 @@ export const register: Register = on => {
     if (ran.isError !== true) {
       const call = e as unknown as Call
       const result = (ran as { result?: unknown }).result
+      const before = await read($, schedule)
       await update($, schedule, (s): Schedule => scheduleAfter(s, call, result))
+      const after = await read($, schedule)
+
+      for (const job of before.crons ?? []) {
+        if (job.recurring && !(after.crons ?? []).some(kept => kept.id === job.id)) loopEnded($, before, job.prompt)
+      }
+      if (before.wakeup && !after.wakeup && call.stop === true) loopEnded($, before, before.wakeup.prompt ?? '')
     }
 
     const command = (e as { command?: unknown }).command
-    if (ran.isError === true) await flash($, 'error')
-    else if (e.tool === 'Bash' && typeof command === 'string' && PARTY.test(command)) await flash($, 'party')
+    const isParty = e.tool === 'Bash' && typeof command === 'string' && PARTY.test(command)
+    if (ran.isError === true && style.reactions.errors) await flash($, 'error')
+    else if (ran.isError !== true && isParty && style.reactions.party) await flash($, 'party')
 
     const file = ran.isError === true ? undefined : editedFile(e)
     await update($, activity, (a): Activity => ({
@@ -1028,6 +1376,7 @@ export const register: Register = on => {
 
   on('ui.message', async ($, e, next) => {
     if (e.element !== TOUCH_KEY) return next(e)
+    if (!style.reactions.click) return {}
 
     const kind = typeof e.data === 'object' && e.data !== null ? (e.data as { kind?: unknown }).kind : undefined
     if (kind === 'poke') {
@@ -1087,7 +1436,18 @@ export const register: Register = on => {
       const key = ALIASES[word]
       if (key !== undefined) overrides[key] = isShown
     }
-    await save({ ...current, isHidden: isShown ? false : current.isHidden, overrides })
+    let layout = resolveLayout(current)
+    if (isShown) {
+      for (const word of rest) {
+        const key = ALIASES[word]
+        const blocks = BLOCKS.filter(block => key !== undefined && BLOCK_KEYS[block].includes(key))
+        for (const block of blocks.filter(b => lineOf(layout, b) === 0)) {
+          const home = DEFAULT_LAYOUT.findIndex(line => line.includes(block)) + 1
+          layout = setLine(layout, block, home > 0 ? home : 1)
+        }
+      }
+    }
+    await save({ ...current, isHidden: isShown ? false : current.isHidden, overrides, layout })
 
     return { text: `${isShown ? 'Affiché' : 'Masqué'} : ${rest.join(', ')}.` }
   })
@@ -1117,6 +1477,7 @@ export const register: Register = on => {
         isWorking: e.props.isWorking,
         columns: e.props.bodyColumns,
         isPreview: false,
+        layout: resolveLayout(p),
       },
     )
 
@@ -1127,11 +1488,12 @@ export const register: Register = on => {
     const p = await read($, prefs)
     style = resolveStyle(p.style)
     await read($, tick)
+    const view = await read($, panel)
     const ui = $.ui.resolve(e)
     const { Box, Text, Button } = ui
     const Select = 'Select' in ui ? ui.Select : undefined
     const show = { ...DEFAULT_SHOW, ...p.overrides }
-    const o = p.style ?? {}
+    const layout = resolveLayout(p)
 
     const preview = drawBand(
       { Box, Text, Svg: e.surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined },
@@ -1146,127 +1508,243 @@ export const register: Register = on => {
         isWorking: false,
         columns: Math.max(20, e.props.bodyColumns - 4),
         isPreview: true,
+        layout,
       },
     )
 
     const setStyle = (change: StyleOverrides) =>
       void changePrefs($, cur => ({ ...cur, style: { ...cur.style, ...change } }))
-    const options = (values: number[], label: (n: number) => string) =>
-      values.map(n => ({ value: String(n), label: label(n) }))
+    const setView = (change: Partial<typeof view>) => void update($, panel, cur => ({ ...cur, ...change }))
+    const changeLayout = (change: (current: BlockId[][]) => BlockId[][], enable: InfoKey[] = []) =>
+      void changePrefs($, cur => ({
+        ...cur,
+        layout: change(resolveLayout(cur)),
+        overrides: { ...cur.overrides, ...Object.fromEntries(enable.map(key => [key, true])) },
+      }))
+    const list = (entries: Array<[string | number, string]>) => entries.map(([value, label]) => ({ value: String(value), label }))
 
     // Une liste de choix ; là où l'app n'en a pas (mobile), un bouton qui passe à l'option suivante.
     const choice = (
       key: string,
       label: string,
-      value: string,
-      list: Array<{ value: string; label: string }>,
+      value: string | number | boolean,
+      options: Array<{ value: string; label: string }>,
       pick: (value: string) => void,
     ) => {
-      if (Select) return <Select key={key} label={label} value={value} options={list} onSelect={picked => pick(picked)} />
+      const current = String(value)
+      if (Select) return <Select key={key} label={label} value={current} options={options} onSelect={picked => pick(picked)} />
 
-      const at = list.findIndex(option => option.value === value)
-      const following = list[(at + 1) % list.length] ?? list[0]
-      const current = list[at]?.label ?? value
+      const at = options.findIndex(option => option.value === current)
+      const following = options[(at + 1) % options.length] ?? options[0]
 
-      return <Button key={key} label={`${label} : ${current} ▸`} onPress={() => following && pick(following.value)} />
+      return (
+        <Button key={key} label={`${label} : ${options[at]?.label ?? current} ▸`} onPress={() => following && pick(following.value)} />
+      )
     }
+
+    const toggle = (key: string, label: string, isOn: boolean, flip: () => void) => (
+      <Button key={key} label={`${isOn ? '●' : '○'} ${label}`} dimColor={!isOn} onPress={flip} />
+    )
+
+    // Une rangée qui passe à la ligne quand la place manque.
+    const row = (key: string, children: RenderElement[], gap = 2) => (
+      <Box key={key} flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={gap} rowGap={1}>
+        {children}
+      </Box>
+    )
+
+    const caption = (key: string, text: string) => (
+      <Text key={key} dimColor>
+        {text}
+      </Text>
+    )
+
+    const applyProfile = (id: string) => {
+      const profile = PROFILES[id]
+      if (!profile) return
+      void changePrefs($, cur => ({
+        ...cur,
+        isHidden: false,
+        layout: profile.layout.map(blocks => [...blocks]),
+        overrides: {
+          ...Object.fromEntries(KEYS.map(key => [key, true])),
+          ...Object.fromEntries(DETAILS.map(([key]) => [key, profile.details.includes(key)])),
+          etat: profile.layout.flat().includes('etat'),
+          mascotte: { ...DEFAULT_SHOW, ...cur.overrides }.mascotte,
+        },
+        style: { ...cur.style, ...profile.style },
+      }))
+    }
+
+    // ── Disposition : les lignes en pastilles, puis ce qu'on fait du bloc choisi ──
+    const isOn = (block: BlockId) => BLOCK_KEYS[block].some(key => show[key])
+    const lines = layout.map(blocks => blocks.filter(isOn))
+    const hidden = BLOCKS.filter(block => lineOf(layout, block) === 0 || !isOn(block))
+    const selected = view.selected
+    const selectedLine = selected && isOn(selected) ? lineOf(layout, selected) : 0
+
+    const chip = (block: BlockId) => (
+      <Button
+        key={`bloc-${block}`}
+        label={BLOCK_CHIPS[block]}
+        variant={selected === block ? 'primary' : 'secondary'}
+        dimColor={hidden.includes(block) && selected !== block}
+        onPress={() => setView({ selected: selected === block ? null : block })}
+      />
+    )
+
+    const lineRow = (n: number, blocks: BlockId[], title: string) => (
+      <Box key={`ligne-${n}`} flexDirection="row" alignItems="center" columnGap={1}>
+        <Box width={9} flexShrink={0}>
+          {n > 0 ? (
+            <Text bold color={style.accent}>
+              {title}
+            </Text>
+          ) : (
+            <Text dimColor>{title}</Text>
+          )}
+        </Box>
+        <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1} flexGrow={1}>
+          {blocks.length > 0 ? blocks.map(chip) : [caption(`vide-${n}`, 'vide')]}
+        </Box>
+      </Box>
+    )
+
+    const actions = (block: BlockId): RenderElement[] => {
+      if (selectedLine === 0) {
+        return [
+          caption('action-titre', `${BLOCK_LABELS[block]} est masqué`),
+          <Button key="action-afficher" label="Afficher sur la ligne 1" variant="primary" onPress={() => changeLayout(current => setLine(current, block, 1), BLOCK_KEYS[block])} />,
+        ]
+      }
+
+      return [
+        caption('action-titre', BLOCK_LABELS[block]),
+        <Button key="action-gauche" label="◀" onPress={() => changeLayout(current => moveBlock(current, block, -1))} />,
+        <Button key="action-droite" label="▶" onPress={() => changeLayout(current => moveBlock(current, block, 1))} />,
+        <Button key="action-monter" label="▲ Ligne" onPress={() => selectedLine > 1 && changeLayout(current => setLine(current, block, selectedLine - 1))} />,
+        <Button key="action-descendre" label="▼ Ligne" onPress={() => selectedLine < 3 && changeLayout(current => setLine(current, block, selectedLine + 1))} />,
+        <Button key="action-masquer" label="Masquer" onPress={() => changeLayout(current => setLine(current, block, 0))} />,
+      ]
+    }
+
+    const disposition = [
+      lineRow(1, lines[0] ?? [], 'Ligne 1'),
+      lineRow(2, lines[1] ?? [], 'Ligne 2'),
+      lineRow(3, lines[2] ?? [], 'Ligne 3'),
+      ...(hidden.length > 0 ? [lineRow(0, hidden, 'Masqués')] : []),
+      <Box key="actions" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} rowGap={1} borderStyle="round" borderColor="#4a4a46" paddingX={1}>
+        {selected ? actions(selected) : [caption('action-aide', 'Choisis un bloc pour le déplacer, le changer de ligne ou le masquer.')]}
+      </Box>,
+      row('ranger', [
+        caption('ranger-titre', 'Tout ranger sur'),
+        ...([1, 2, 3] as const).map(n => (
+          <Button key={`ranger-${n}`} label={`${n} ligne${n > 1 ? 's' : ''}`} onPress={() => changeLayout(current => arrange(current, n))} />
+        )),
+      ], 1),
+      row('details', [
+        caption('details-titre', 'Détails'),
+        ...DETAILS.map(([key, label]) =>
+          toggle(`info-${key}`, label, show[key], () =>
+            void changePrefs($, cur => ({ ...cur, overrides: { ...cur.overrides, [key]: !({ ...DEFAULT_SHOW, ...cur.overrides }[key]) } })),
+          ),
+        ),
+      ], 1),
+      row('textes', [
+        choice('separator', 'Séparateur', style.separator, list([['space', 'Espace'], ['dot', 'Point ·'], ['bar', 'Barre │']]), v => setStyle({ separator: v as Style['separator'] })),
+        choice('labels', 'Libellés', style.labels, list([['short', 'Courts'], ['long', 'Longs']]), v => setStyle({ labels: v as Style['labels'] })),
+        choice('currency', 'Coût', style.currency, list([['usd', '$'], ['eur', '€']]), v => setStyle({ currency: v as Style['currency'] })),
+      ]),
+    ]
+
+    // ── Style : jauges et couleurs ──
+    const looks = [
+      caption('jauges-titre', 'Jauges'),
+      row('jauges-forme', [
+        choice('shape', 'Forme', style.shape, list([['squares', 'Carrés'], ['pill', 'Pilule'], ['dots', 'Points'], ['thin', 'Traits']]), v => setStyle({ shape: v as Style['shape'] })),
+        choice('size', 'Taille', style.size, list([['small', 'Petite'], ['medium', 'Moyenne'], ['large', 'Grande']]), v => setStyle({ size: v as Style['size'] })),
+        choice('segments', 'Segments', style.segments, list([5, 8, 10, 12, 15, 20].map(n => [n, `${n}`])), v => setStyle({ segments: Number(v) })),
+      ]),
+      row('jauges-valeurs', [
+        choice('percent', 'Afficher', style.percent, list([['left', '% restant'], ['used', '% consommé']]), v => setStyle({ percent: v as Style['percent'] })),
+        choice('warnAt', 'Orange dès', style.warnAt, list([50, 60, 70, 80].map(n => [n, `${n} %`])), v => setStyle({ warnAt: Number(v) })),
+        choice('alertAt', 'Rouge dès', style.alertAt, list([80, 85, 90, 95].map(n => [n, `${n} %`])), v => setStyle({ alertAt: Number(v) })),
+      ]),
+      caption('couleurs-titre', 'Couleurs'),
+      row('couleurs', [
+        choice('palette', 'Palette', style.palette, list(Object.entries(PALETTES).map(([id, palette]) => [id, palette.label])), v => setStyle({ palette: v })),
+        choice('accent', 'Accent', style.accent, list(Object.entries(ACCENTS)), v => setStyle({ accent: v })),
+        choice('costAccent', 'Coût', style.costAccent, list([['false', 'Normal'], ['true', 'Accent']]), v => setStyle({ costAccent: v === 'true' })),
+      ]),
+    ]
+
+    // ── Pixel ──
+    const reactions = style.reactions
+    const setReaction = (key: keyof typeof reactions) => setStyle({ reactions: { ...reactions, [key]: !reactions[key] } })
+    const pixel = [
+      row('pixel-allure', [
+        choice('mascotte', 'Afficher', show.mascotte, list([['true', 'Oui'], ['false', 'Non']]), v =>
+          void changePrefs($, cur => ({ ...cur, overrides: { ...cur.overrides, mascotte: v === 'true' } })),
+        ),
+        choice('pixelColor', 'Couleur', style.pixelColor, list(Object.entries(PIXEL_COLORS)), v => setStyle({ pixelColor: v })),
+      ]),
+      row('pixel-place', [
+        choice('pixelSize', 'Taille', style.pixelSize, list([['small', 'Petit'], ['normal', 'Normal'], ['large', 'Grand']]), v => setStyle({ pixelSize: v as Style['pixelSize'] })),
+        choice('pixelSide', 'Côté', style.pixelSide, list([['right', 'Droite'], ['left', 'Gauche']]), v => setStyle({ pixelSide: v as Style['pixelSide'] })),
+      ]),
+      row('reactions', [
+        caption('reactions-titre', 'Réagit'),
+        toggle('reaction-click', 'au clic', reactions.click, () => setReaction('click')),
+        toggle('reaction-thanks', 'aux mercis', reactions.thanks, () => setReaction('thanks')),
+        toggle('reaction-party', 'aux commits', reactions.party, () => setReaction('party')),
+        toggle('reaction-errors', 'aux erreurs', reactions.errors, () => setReaction('errors')),
+      ], 1),
+      row('pixel-temps', [
+        choice('flashSeconds', 'Réactions', style.flashSeconds, list([2, 4, 6, 10].map(n => [n, `${n} s`])), v => setStyle({ flashSeconds: Number(v) })),
+        choice('sleepAfterMinutes', "S'endort après", style.sleepAfterMinutes, list([5, 10, 30, 0].map(n => [n, n === 0 ? 'Jamais' : `${n} min`])), v =>
+          setStyle({ sleepAfterMinutes: Number(v) }),
+        ),
+      ]),
+    ]
+
+    // ── Alertes ──
+    const alerting = [
+      choice('alertLimitAt', 'Limite qui dépasse', style.alertLimitAt, list([[0, 'Désactivée'], [75, '75 %'], [90, '90 %']]), v => setStyle({ alertLimitAt: Number(v) })),
+      choice('alertContextBelow', 'Contexte sous', style.alertContextBelow, list([[0, 'Désactivée'], [20, '20 % libre'], [10, '10 % libre']]), v =>
+        setStyle({ alertContextBelow: Number(v) }),
+      ),
+      choice('alertLoopEnd', "Fin d'une boucle", style.alertLoopEnd, list([['true', 'Notification'], ['false', 'Rien']]), v => setStyle({ alertLoopEnd: v === 'true' })),
+      caption('alertes-note', 'Une notification discrète, une seule fois par seuil.'),
+    ]
+
+    const content = { disposition, style: looks, pixel, alertes: alerting }[view.tab] ?? disposition
 
     return (
       <Box flexDirection="column" rowGap={1}>
-        <Box flexDirection="column">
-          <Text bold>Aperçu</Text>
-          <Box borderStyle="round" borderColor="#5a5a55" paddingX={1}>
-            {preview ?? <Text dimColor>Rien à afficher : tout est masqué.</Text>}
-          </Box>
+        <Box flexDirection="column" borderStyle="round" borderColor={style.accent} paddingX={1}>
+          {preview ?? <Text dimColor>Rien à afficher : tout est masqué.</Text>}
         </Box>
 
-        <Box flexDirection="column">
-          <Text bold>Infos affichées</Text>
-          <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
-            {KEYS.map(key => (
-              <Button
-                key={`info-${key}`}
-                label={`${show[key] ? '●' : '○'} ${INFO_LABELS[key]}`}
-                dimColor={!show[key]}
-                onPress={() =>
-                  void changePrefs($, cur => ({
-                    ...cur,
-                    overrides: { ...cur.overrides, [key]: !({ ...DEFAULT_SHOW, ...cur.overrides }[key]) },
-                  }))
-                }
-              />
-            ))}
-          </Box>
+        {row('profils', [
+          caption('profils-titre', 'Profils'),
+          ...Object.entries(PROFILES).map(([id, profile]) => (
+            <Button key={`profil-${id}`} label={profile.label} onPress={() => applyProfile(id)} />
+          )),
+        ], 1)}
+
+        {row('onglets', TABS.map(([tab, label]) => (
+          <Button key={`onglet-${tab}`} label={label} variant={view.tab === tab ? 'primary' : 'secondary'} onPress={() => setView({ tab })} />
+        )), 1)}
+
+        <Box flexDirection="column" rowGap={1} paddingX={1}>
+          {content}
         </Box>
 
-        <Box flexDirection="column" rowGap={1}>
-          <Text bold>Jauges</Text>
-          {choice(
-            'palette',
-            "Couleurs",
-            style.palette,
-            Object.entries(PALETTES).map(([value, palette]) => ({ value, label: palette.label })),
-            value => setStyle({ palette: value }),
-          )}
-          {choice(
-            'segments',
-            "Segments par jauge",
-            String(style.segments),
-            options([5, 8, 10, 12, 15, 20], n => `${n} segments`),
-            value => setStyle({ segments: Number(value) }),
-          )}
-          {choice(
-            'warnAt',
-            "Orange à partir de",
-            String(style.warnAt),
-            options([50, 60, 70, 80], n => `${n} % consommés`),
-            value => setStyle({ warnAt: Number(value) }),
-          )}
-          {choice(
-            'alertAt',
-            "Rouge à partir de",
-            String(style.alertAt),
-            options([80, 85, 90, 95], n => `${n} % consommés`),
-            value => setStyle({ alertAt: Number(value) }),
-          )}
-        </Box>
-
-        <Box flexDirection="column" rowGap={1}>
-          <Text bold>Pixel</Text>
-          {choice(
-            'flashSeconds',
-            "Durée de ses réactions",
-            String(style.flashSeconds),
-            options([2, 4, 6, 10], n => `${n} secondes`),
-            value => setStyle({ flashSeconds: Number(value) }),
-          )}
-          {choice(
-            'sleepAfterMinutes',
-            "S'endort après",
-            String(style.sleepAfterMinutes),
-            options([5, 10, 30, 0], n => (n === 0 ? 'Jamais' : `${n} minutes sans activité`)),
-            value => setStyle({ sleepAfterMinutes: Number(value) }),
-          )}
-        </Box>
-
-        <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
-          <Button
-            key="visible"
-            label={p.isHidden ? 'Afficher le bandeau' : 'Masquer le bandeau'}
-            onPress={() => void changePrefs($, cur => ({ ...cur, isHidden: !cur.isHidden }))}
-          />
-          <Button
-            key="defaut"
-            label="Tout réinitialiser"
-            onPress={() => void changePrefs($, () => ({ isHidden: false, overrides: {}, style: {} }))}
-          />
-          <Button key="fermer" label="Fermer" role="dismiss" onPress={() => void $.ui.close({ id: PANE })} />
-        </Box>
-        {Object.keys(o).length > 0 || Object.keys(p.overrides).length > 0 ? (
-          <Text dimColor>Tes réglages sont enregistrés et gardés d'une session à l'autre.</Text>
-        ) : (
-          <Text dimColor>Chaque changement s'applique tout de suite au bandeau.</Text>
-        )}
+        {row('pied', [
+          <Button key="visible" label={p.isHidden ? 'Afficher le bandeau' : 'Masquer le bandeau'} onPress={() => void changePrefs($, cur => ({ ...cur, isHidden: !cur.isHidden }))} />,
+          <Button key="defaut" label="Tout réinitialiser" onPress={() => void changePrefs($, () => ({ isHidden: false, overrides: {}, style: {} }))} />,
+          <Button key="fermer" label="Fermer" role="dismiss" onPress={() => void $.ui.close({ id: PANE })} />,
+        ], 1)}
       </Box>
     )
   })

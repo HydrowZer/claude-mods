@@ -96,21 +96,64 @@ export type InfoKey =
   | 'arriereplan'
   | 'mascotte'
 
+export type Reactions = { click: boolean; thanks: boolean; party: boolean; errors: boolean }
+
 /** Ce qu'on règle depuis le panneau ; absent, la valeur par défaut du code. */
 export type StyleOverrides = {
+  // Disposition
+  separator?: 'space' | 'dot' | 'bar'
+  labels?: 'short' | 'long'
+  currency?: 'usd' | 'eur'
+  // Jauges
+  shape?: 'squares' | 'pill' | 'dots' | 'thin'
   segments?: number
+  size?: 'small' | 'medium' | 'large'
+  percent?: 'left' | 'used'
   warnAt?: number
   alertAt?: number
+  // Couleurs
   palette?: string
+  accent?: string
+  costAccent?: boolean
+  // Pixel
+  pixelColor?: string
+  pixelSize?: 'small' | 'normal' | 'large'
+  pixelSide?: 'right' | 'left'
+  reactions?: Partial<Reactions>
   flashSeconds?: number
   /** 0 : Pixel ne s'endort jamais. */
   sleepAfterMinutes?: number
+  // Alertes (0 : désactivée)
+  alertLimitAt?: number
+  alertContextBelow?: number
+  alertLoopEnd?: boolean
 }
+
+/** Les blocs qu'on range dans le bandeau. */
+export type BlockId =
+  | 'etat'
+  | 'modele'
+  | 'projet'
+  | 'git'
+  | 'duree'
+  | 'cout'
+  | 'activite'
+  | 'contexte'
+  | 'limite5h'
+  | 'limite7j'
+  | 'autres'
+  | 'boucles'
+  | 'taches'
+  | 'arriereplan'
+
+export type PanelTab = 'disposition' | 'style' | 'pixel' | 'alertes'
 
 export type Prefs = {
   isHidden: boolean
   overrides: { [K in InfoKey]?: boolean }
   style?: StyleOverrides
+  /** Les lignes du bandeau, chacune avec ses blocs dans l'ordre ; un bloc absent est masqué. */
+  layout?: BlockId[][]
 }
 
 declare module 'claude-code' {
@@ -122,6 +165,10 @@ declare module 'claude-code' {
       prefs: Prefs
       mascot: Mascot
       schedule: Schedule
+      /** Alertes déjà envoyées, pour n'en envoyer qu'une par seuil. */
+      alerts: string[]
+      /** Le panneau de réglages : onglet ouvert et bloc sélectionné. */
+      panel: { tab: PanelTab; selected: BlockId | null }
       tick: number
     }
   }
