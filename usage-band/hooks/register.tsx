@@ -672,7 +672,6 @@ export const register: Register = on => {
           alt={`Mascotte : ${MOODS[current].label}`}
           width={MASCOT_WIDTH}
           height={MASCOT_HEIGHT}
-          isInteractive
         />
       ) : (
         <Text color={SETTINGS.mascot.color} bold>

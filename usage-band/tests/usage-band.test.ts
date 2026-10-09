@@ -190,7 +190,7 @@ test('Pixel est au repos dans le terminal et dessiné dans l\'app desktop', asyn
 
   const band = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   const pixel = (await band.findAll({ type: 'Svg' })).find(found => found.props.alt === 'Mascotte : au repos')
-  expect(pixel?.props.isInteractive).toBe(true)
+  expect(pixel?.props.isInteractive).toBeUndefined()
   expect(String(pixel?.props.source)).toContain('<title>Pixel au repos</title>')
 })
 
