@@ -11,6 +11,18 @@ const LIMITS = [
   { kind: 'seven_day', percentUsed: 81, resetsAt: at((3 * 24 + 4) * 60) },
 ]
 
+const STATUS = [
+  '# branch.oid 3c63755a1b2c3d4e5f60718293a4b5c6d7e8f901',
+  '# branch.head main',
+  '# branch.upstream origin/main',
+  '# branch.ab +2 -1',
+  '1 .M N... 100644 100644 100644 aaaaaaa bbbbbbb hooks/register.tsx',
+  '1 M. N... 100644 100644 100644 ccccccc ddddddd README.md',
+  '? notes.txt',
+  '',
+].join('\n')
+const NUMSTAT = '120\t30\thooks/register.tsx\n4\t7\tREADME.md\n-\t-\tlogo.png\n'
+
 const PROPS = {
   hasSurvey: false,
   isWorking: false,
@@ -43,10 +55,10 @@ function world(on: On) {
   }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
   on('session.cwd', () => ({ value: '/Users/moi/Developer/Bouilles' }))
-  on('process.run', () => ({
+  on('process.run', (_$, e) => ({
     value: {
       exitCode: 0,
-      stdout: 'main\n',
+      stdout: e.argv.includes('status') ? STATUS : e.argv.includes('diff') ? NUMSTAT : '',
       stderr: '',
       isStdoutTruncated: false,
       isStderrTruncated: false,
@@ -56,8 +68,17 @@ function world(on: On) {
   return clock
 }
 
-async function shown($: Engine, surface: 'terminal' | 'desktop' = 'terminal'): Promise<string> {
-  const band = await $.ui.mount({ plugin: 'usage-band', surface, component: 'AbovePrompt', props: PROPS })
+async function shown(
+  $: Engine,
+  surface: 'terminal' | 'desktop' = 'terminal',
+  props: Partial<typeof PROPS> = {},
+): Promise<string> {
+  const band = await $.ui.mount({
+    plugin: 'usage-band',
+    surface,
+    component: 'AbovePrompt',
+    props: { ...PROPS, ...props },
+  })
   const texts = await band.findAll({ type: 'Text' })
 
   return texts.map(found => found.text).join('')
@@ -87,7 +108,9 @@ test("dessine les segments en SVG dans l'app desktop", async ($, on) => {
   world(on)
   await measure($)
   const band = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
-  const meters = await band.findAll({ type: 'Svg' })
+  const meters = (await band.findAll({ type: 'Svg' })).filter(
+    found => !String(found.props.alt).startsWith('Mascotte'),
+  )
   const text = (await band.findAll({ type: 'Text' })).map(found => found.text).join('')
 
   expect(meters.map(meter => meter.props.alt)).toEqual([
@@ -145,4 +168,68 @@ test('/bandeau masquer cache tout le bandeau', async ($, on) => {
   await $.command.run({ ...COMMAND, args: 'masquer' })
 
   expect(await shown($)).toBe('')
+})
+
+test("affiche l'état git à côté de la branche", async ($, on) => {
+  const clock = world(on)
+  await $.session.start({ cwd: '/Users/moi/Developer/Bouilles', surface: 'terminal', isInteractive: true })
+  await clock.advance(1)
+  const text = await shown($)
+
+  expect(text).toContain('Bouilles · main')
+  expect(text).toContain('+124−37')
+  expect(text).toContain('3 non commités')
+  expect(text).toContain('↑2↓1')
+})
+
+test('Pixel est au repos dans le terminal et dessiné dans l\'app desktop', async ($, on) => {
+  world(on)
+  await measure($)
+
+  expect(await shown($, 'terminal')).toContain('(•ᴗ•)')
+
+  const band = await $.ui.mount({ plugin: 'usage-band', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  const pixel = (await band.findAll({ type: 'Svg' })).find(found => found.props.alt === 'Mascotte : au repos')
+  expect(pixel?.props.isInteractive).toBe(true)
+  expect(String(pixel?.props.source)).toContain('<title>Pixel au repos</title>')
+})
+
+test('Pixel réfléchit pendant un tour, puis réagit aux erreurs et aux commits', async ($, on) => {
+  const clock = world(on)
+  let isError = true
+  on('tool.call', () => (isError ? { result: null, isError: true, text: 'boom' } : { result: null, text: 'ok' }))
+  await measure($)
+
+  expect(await shown($, 'terminal', { isWorking: true })).toContain('(•_•)…')
+
+  await $.tool.call({ tool: 'Bash', command: 'false' })
+  expect(await shown($)).toContain('(×_×)')
+
+  isError = false
+  await $.tool.call({ tool: 'Bash', command: 'git push origin main' })
+  expect(await shown($)).toContain('\\(^o^)/')
+
+  await clock.advance(5000)
+  expect(await shown($)).toContain('(•ᴗ•)')
+})
+
+test('Pixel fond quand on dit merci, et s\'endort après 10 minutes', async ($, on) => {
+  const clock = world(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await measure($)
+
+  await $.prompt.submit({ text: 'Merci, génial !', wait: false, origin: { kind: 'composer' } })
+  expect(await shown($)).toContain('(♥ᴗ♥)')
+
+  await clock.advance(11 * 60_000)
+  expect(await shown($)).toContain('(-_-) zᶻ')
+})
+
+test('/bandeau masquer mascotte retire Pixel', async ($, on) => {
+  world(on)
+  await measure($)
+  await $.command.run({ ...COMMAND, args: 'masquer mascotte' })
+
+  expect(await shown($)).not.toContain('(•ᴗ•)')
+  expect(await shown($)).toContain('72 %')
 })

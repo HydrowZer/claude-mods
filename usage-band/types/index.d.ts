@@ -7,14 +7,49 @@ export type Usage = {
   startedAt: number | null
 }
 
-export type Info = { model: string | null; project: string | null; branch: string | null }
+export type GitState = {
+  added: number
+  removed: number
+  dirty: number
+  ahead: number
+  behind: number
+}
+
+export type Info = {
+  model: string | null
+  project: string | null
+  branch: string | null
+  git: GitState | null
+}
 
 export type Activity = { since: number | null; tools: number; files: string[] }
+
+export type Mood =
+  | 'idle'
+  | 'think'
+  | 'code'
+  | 'read'
+  | 'bash'
+  | 'web'
+  | 'agent'
+  | 'done'
+  | 'error'
+  | 'alert'
+  | 'sleep'
+  | 'party'
+  | 'love'
+
+export type Mascot = {
+  running: { [toolUseId: string]: Mood }
+  flash: { mood: Mood; until: number } | null
+  lastActivity: number | null
+}
 
 export type InfoKey =
   | 'modele'
   | 'projet'
   | 'branche'
+  | 'git'
   | 'duree'
   | 'cout'
   | 'outils'
@@ -23,6 +58,7 @@ export type InfoKey =
   | 'contexte'
   | 'limites'
   | 'reset'
+  | 'mascotte'
 
 export type Prefs = { isHidden: boolean; overrides: { [K in InfoKey]?: boolean } }
 
@@ -33,6 +69,7 @@ declare module 'claude-code' {
       info: Info
       activity: Activity
       prefs: Prefs
+      mascot: Mascot
       tick: number
     }
   }

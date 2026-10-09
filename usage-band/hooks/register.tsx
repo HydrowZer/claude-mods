@@ -8,7 +8,8 @@ import type {
   TextProps,
 } from 'claude-code'
 
-import type { Activity, Info, InfoKey, Limit, Prefs, Usage } from '../types'
+import type { Activity, GitState, Info, InfoKey, Limit, Mascot, Mood, Prefs, Usage } from '../types'
+import { MASCOT_HEIGHT, MASCOT_WIDTH, MOODS, mascotSvg } from './mascot'
 
 // ─── Réglages ────────────────────────────────────────────────────────────────
 // Tout se personnalise ici : le bandeau se recharge à chaque enregistrement.
@@ -21,6 +22,7 @@ const DEFAULT_SHOW: Record<InfoKey, boolean> = {
   modele: true, // Opus 5.5
   projet: true, // nom du dossier
   branche: true, // branche git
+  git: true, // +124 −37 · 3 non commités · ↑2 ↓1
   duree: true, // durée de la session
   cout: true, // Session ≈ 5,92 $
   outils: true, // nombre d'appels d'outils
@@ -28,6 +30,7 @@ const DEFAULT_SHOW: Record<InfoKey, boolean> = {
   contexte: true, // place libre dans la fenêtre de contexte
   limites: true, // limites 5 h, 7 j…
   reset: true, // temps avant le reset de chaque limite
+  mascotte: true, // Pixel, tout à droite
 }
 
 const SETTINGS = {
@@ -53,10 +56,51 @@ const SETTINGS = {
     model: '#a78bfa',
     track: '#8a8a85',
     working: '#4ade80',
+    added: '#4ade80',
+    removed: '#f87171',
+    ahead: '#7cc4ff',
+    behind: '#fb923c',
   },
   /** Noms courts des limites. */
   limitLabels: { five_hour: '5 h', seven_day: '7 j', spend_limit: 'Plafond' } as Record<string, string>,
+  mascot: {
+    /** Couleur du visage dans le terminal. */
+    color: '#D97757',
+    /** Durée des réactions (fin de tour, erreur, fête, merci), en secondes. */
+    flashSeconds: 4,
+    /** Pixel s'endort après ce nombre de minutes sans activité. */
+    sleepAfterMinutes: 10,
+    /** Pixel s'inquiète sous ce % de contexte libre (et dès qu'une limite passe `alertAt`). */
+    alertContextFree: 15,
+  },
 }
+
+/** Ce que fait Pixel pendant chaque outil ; les autres le font réfléchir. */
+const TOOL_MOODS: Record<string, Mood> = {
+  Edit: 'code',
+  Write: 'code',
+  MultiEdit: 'code',
+  NotebookEdit: 'code',
+  Read: 'read',
+  Grep: 'read',
+  Glob: 'read',
+  LS: 'read',
+  NotebookRead: 'read',
+  Bash: 'bash',
+  BashOutput: 'bash',
+  KillShell: 'bash',
+  WebFetch: 'web',
+  WebSearch: 'web',
+  Agent: 'agent',
+  Task: 'agent',
+}
+
+/** Commandes qui font la fête quand elles réussissent : commit, push, tests. */
+const PARTY =
+  /\bgit\s+(commit|push)\b|\b(npm|pnpm|yarn|bun)\s+(run\s+)?test\b|\b(pytest|vitest|jest)\b|\b(cargo|go|swift)\s+test\b|\bclaude\s+plugin\s+test\b/
+
+/** Mots qui font plaisir à Pixel (comparés sans accents). */
+const THANKS = /\b(merci|thanks|thank you|thx|bravo|genial|parfait|nickel|trop bien)\b|♥|❤/
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -65,6 +109,7 @@ const info = atom({ plugin: 'usage-band', key: 'info' } as const, {
   model: null,
   project: null,
   branch: null,
+  git: null,
 })
 const activity = atom({ plugin: 'usage-band', key: 'activity' } as const, {
   since: null,
@@ -75,7 +120,14 @@ const prefs = atom({ plugin: 'usage-band', key: 'prefs' } as const, {
   isHidden: false,
   overrides: {},
 })
+const mascot = atom({ plugin: 'usage-band', key: 'mascot' } as const, {
+  running: {},
+  flash: null,
+  lastActivity: null,
+})
 const tick = atom({ plugin: 'usage-band', key: 'tick' } as const, 0)
+
+let lastGitAt = 0
 
 const KEYS = Object.keys(DEFAULT_SHOW) as InfoKey[]
 
@@ -83,8 +135,9 @@ const ALIASES: Record<string, InfoKey> = {
   ...Object.fromEntries(KEYS.map(key => [key, key])),
   model: 'modele',
   dossier: 'projet',
-  git: 'branche',
   temps: 'duree',
+  mascot: 'mascotte',
+  pixel: 'mascotte',
   prix: 'cout',
   ctx: 'contexte',
 }
@@ -228,14 +281,52 @@ function editedFile(e: { tool: string }): string | undefined {
   return typeof path === 'string' ? path : undefined
 }
 
-async function gitBranch($: EngineInterface, cwd: string): Promise<string | null> {
+type Repo = { branch: string | null; git: GitState | null }
+
+async function readRepo($: EngineInterface, cwd: string): Promise<Repo> {
   const opts = { cwd, timeoutMs: 3000 }
-  const named = await $.process.run(['git', 'symbolic-ref', '--short', '-q', 'HEAD'], opts)
-  if (named.exitCode === 0 && named.stdout.trim()) return named.stdout.trim()
+  const status = await $.process.run(['git', 'status', '--porcelain=v2', '--branch'], opts)
+  if (status.exitCode !== 0) return { branch: null, git: null }
 
-  const detached = await $.process.run(['git', 'rev-parse', '--short', 'HEAD'], opts)
+  let branch: string | null = null
+  let oid = ''
+  const git: GitState = { added: 0, removed: 0, dirty: 0, ahead: 0, behind: 0 }
+  for (const line of status.stdout.split('\n')) {
+    if (line.startsWith('# branch.head ')) branch = line.slice('# branch.head '.length).trim()
+    else if (line.startsWith('# branch.oid ')) oid = line.slice('# branch.oid '.length).trim()
+    else if (line.startsWith('# branch.ab ')) {
+      const ab = /\+(\d+) -(\d+)/.exec(line)
+      git.ahead = Number(ab?.[1] ?? 0)
+      git.behind = Number(ab?.[2] ?? 0)
+    } else if (/^[12u?] /.test(line)) git.dirty += 1
+  }
+  if (branch === '(detached)') branch = oid && oid !== '(initial)' ? oid.slice(0, 7) : null
 
-  return detached.exitCode === 0 && detached.stdout.trim() ? detached.stdout.trim() : null
+  const diff = await $.process.run(['git', 'diff', 'HEAD', '--numstat'], opts)
+  if (diff.exitCode === 0) {
+    for (const line of diff.stdout.split('\n')) {
+      const [added, removed] = line.split('\t')
+      if (added && removed && added !== '-') {
+        git.added += Number(added) || 0
+        git.removed += Number(removed) || 0
+      }
+    }
+  }
+
+  return { branch, git }
+}
+
+async function refreshGit($: EngineInterface): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    if (now - lastGitAt < 2000) return
+    lastGitAt = now
+
+    const repo = await readRepo($, await $.session.cwd())
+    await update($, info, (i): Info => ({ ...i, ...repo }))
+  } catch {
+    // L'état git garde ses dernières valeurs.
+  }
 }
 
 async function refresh($: EngineInterface): Promise<void> {
@@ -243,8 +334,8 @@ async function refresh($: EngineInterface): Promise<void> {
     const u = await $.session.usage()
     const model = await $.session.model()
     const cwd = await $.session.cwd()
-    const branch = await gitBranch($, cwd).catch(() => null)
-    const next: Info = { model: prettyModel(model), project: basename(cwd), branch }
+    const repo = await readRepo($, cwd).catch((): Repo => ({ branch: null, git: null }))
+    const next: Info = { model: prettyModel(model), project: basename(cwd), ...repo }
 
     await update($, usage, () => toUsage(u.rateLimits, u.cost, u.context, u.startedAt))
     await update($, info, () => next)
@@ -254,6 +345,36 @@ async function refresh($: EngineInterface): Promise<void> {
   } catch {
     // Le bandeau garde ses dernières valeurs.
   }
+}
+
+function moodFor(m: Mascot, isWorking: boolean, u: Usage | null, now: number): Mood {
+  const running = Object.values(m.running)
+  const tool = running[running.length - 1]
+  if (tool) return tool
+  if (m.flash && m.flash.until > now) return m.flash.mood
+  if (isWorking) return 'think'
+
+  const { alertContextFree, sleepAfterMinutes } = SETTINGS.mascot
+  const isTight =
+    u !== null &&
+    (u.limits.some(limit => limit.percentUsed >= SETTINGS.alertAt) ||
+      (u.contextPercent != null && 100 - u.contextPercent < alertContextFree))
+  if (isTight) return 'alert'
+  if (m.lastActivity != null && now - m.lastActivity > sleepAfterMinutes * 60_000) return 'sleep'
+
+  return 'idle'
+}
+
+async function touch($: EngineInterface, change: (m: Mascot) => Mascot = m => m): Promise<void> {
+  const now = await $.clock.now()
+  await update($, mascot, (m): Mascot => ({ ...change(m), lastActivity: now }))
+}
+
+async function flash($: EngineInterface, mood: Mood): Promise<void> {
+  const now = await $.clock.now()
+  const ms = SETTINGS.mascot.flashSeconds * 1000
+  await update($, mascot, (m): Mascot => ({ ...m, flash: { mood, until: now + ms }, lastActivity: now }))
+  $.clock.after(ms + 50, () => void update($, tick, n => n + 1))
 }
 
 function topChunks(
@@ -284,6 +405,18 @@ function topChunks(
         ...(branch ? [{ text: branch }] : []),
       ]),
     )
+  }
+
+  const git = show.git ? (i.git ?? null) : null
+  if (git) {
+    const parts: Part[] = [
+      ...(git.added > 0 ? [{ text: `+${git.added}`, color: colors.added }] : []),
+      ...(git.removed > 0 ? [{ text: `−${git.removed}`, color: colors.removed }] : []),
+      ...(git.dirty > 0 ? [dim(`${git.dirty} non commité${git.dirty > 1 ? 's' : ''}`)] : []),
+      ...(git.ahead > 0 ? [{ text: `↑${git.ahead}`, color: colors.ahead }] : []),
+      ...(git.behind > 0 ? [{ text: `↓${git.behind}`, color: colors.behind }] : []),
+    ]
+    if (parts.length > 0) out.push({ key: 'git', gap: 1, full: parts, short: parts })
   }
 
   if (show.duree && u?.startedAt != null && now >= u.startedAt) {
@@ -372,14 +505,17 @@ export const register: Register = on => {
     if (isPrefs(saved)) await update($, prefs, () => saved)
 
     $.clock.every(60_000, () => void update($, tick, n => n + 1))
+    await touch($, m => ({ ...m, running: {}, flash: null }))
     const started = await next(e)
     void refresh($)
 
     return started
   })
 
-  on('prompt.submit', ($, e, next) => {
+  on('prompt.submit', async ($, e, next) => {
     void refresh($)
+    const isThanks = e.origin.kind === 'composer' && THANKS.test(normalize(e.text))
+    await (isThanks ? flash($, 'love') : touch($))
 
     return next(e)
   })
@@ -387,6 +523,14 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
     void refresh($)
+
+    const now = await $.clock.now()
+    const m = await read($, mascot)
+    const isPartying = m.flash?.mood === 'party' && m.flash.until > now
+    await update($, mascot, (state): Mascot => ({ ...state, running: {} }))
+    if (e.reason === 'error') await flash($, 'error')
+    else if (e.reason === 'answer' && !isPartying) await flash($, 'done')
+    else await touch($)
 
     return done
   })
@@ -398,8 +542,23 @@ export const register: Register = on => {
   })
 
   on('tool.call', async ($, e, next) => {
-    const ran = await next(e)
+    const id = e.tool_use_id
+    await touch($, m => ({ ...m, running: { ...m.running, [id]: TOOL_MOODS[e.tool] ?? 'think' } }))
+
+    let ran: Awaited<ReturnType<typeof next>>
+    try {
+      ran = await next(e)
+    } finally {
+      await touch($, m => ({
+        ...m,
+        running: Object.fromEntries(Object.entries(m.running).filter(([key]) => key !== id)),
+      }))
+    }
     if (ran.deny !== undefined) return ran
+
+    const command = (e as { command?: unknown }).command
+    if (ran.isError === true) await flash($, 'error')
+    else if (e.tool === 'Bash' && typeof command === 'string' && PARTY.test(command)) await flash($, 'party')
 
     const file = ran.isError === true ? undefined : editedFile(e)
     await update($, activity, (a): Activity => ({
@@ -407,6 +566,7 @@ export const register: Register = on => {
       tools: a.tools + 1,
       files: file === undefined || a.files.includes(file) ? a.files : [...a.files, file].slice(-500),
     }))
+    if (EDITORS.has(e.tool) || e.tool === 'Bash') void refreshGit($)
 
     return ran
   }).catch(($, e, next) => next(e))
@@ -461,24 +621,27 @@ export const register: Register = on => {
     const u = await read($, usage)
     const i = await read($, info)
     const a = await read($, activity)
+    const m = await read($, mascot)
     await read($, tick)
     const now = await $.clock.now()
     const show = { ...DEFAULT_SHOW, ...p.overrides }
+    const mood = show.mascotte ? moodFor(m, e.props.isWorking, u, now) : null
 
     const lines = [
       { key: 'infos', chunks: topChunks(show, u, i, a, now, e.props.isWorking) },
       { key: 'jauges', chunks: gaugeChunks(show, u, now) },
     ].filter(line => line.chunks.length > 0)
 
-    if (lines.length === 0) return next(e)
+    if (lines.length === 0 && mood === null) return next(e)
 
     const ui = $.ui.resolve(e)
     const { Box, Text } = ui
     const Svg = e.surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined
-    const room = e.props.bodyColumns
     const { width, height, gap } = SETTINGS.segment
     const meterWidth = SETTINGS.segments * width + (SETTINGS.segments - 1) * gap
     const empty = SETTINGS.segments
+    const mascotCells = mood === null ? 0 : (Svg ? 10 : [...MOODS[mood].kao].length) + 2
+    const room = e.props.bodyColumns - mascotCells
 
     const drawMeter = (meter: Meter) => {
       if (Svg) {
@@ -502,28 +665,50 @@ export const register: Register = on => {
     const draw = (part: Part) =>
       isMeter(part) ? drawMeter(part) : <Text {...textProps(part)}>{part.text}</Text>
 
-    return (
-      <Box flexDirection="column">
-        {lines.map(line => {
-          const isShort = lineWidth(line.chunks) > room
+    const drawMascot = (current: Mood) =>
+      Svg ? (
+        <Svg
+          source={mascotSvg(current)}
+          alt={`Mascotte : ${MOODS[current].label}`}
+          width={MASCOT_WIDTH}
+          height={MASCOT_HEIGHT}
+          isInteractive
+        />
+      ) : (
+        <Text color={SETTINGS.mascot.color} bold>
+          {MOODS[current].kao}
+        </Text>
+      )
 
-          return (
-            <Box key={line.key} flexDirection="row" flexWrap="wrap" columnGap={SETTINGS.gap}>
-              {line.chunks.map(chunk => (
-                <Box
-                  key={`${line.key}-${chunk.key}`}
-                  flexDirection="row"
-                  alignItems="center"
-                  columnGap={chunk.gap}
-                >
-                  {(isShort ? chunk.short : chunk.full)
-                    .filter(part => isMeter(part) || part.text !== '')
-                    .map(draw)}
-                </Box>
-              ))}
-            </Box>
-          )
-        })}
+    return (
+      <Box flexDirection="row" alignItems="center" columnGap={2}>
+        <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+          {lines.map(line => {
+            const isShort = lineWidth(line.chunks) > room
+
+            return (
+              <Box key={line.key} flexDirection="row" flexWrap="wrap" columnGap={SETTINGS.gap}>
+                {line.chunks.map(chunk => (
+                  <Box
+                    key={`${line.key}-${chunk.key}`}
+                    flexDirection="row"
+                    alignItems="center"
+                    columnGap={chunk.gap}
+                  >
+                    {(isShort ? chunk.short : chunk.full)
+                      .filter(part => isMeter(part) || part.text !== '')
+                      .map(draw)}
+                  </Box>
+                ))}
+              </Box>
+            )
+          })}
+        </Box>
+        {mood !== null && (
+          <Box key="mascotte" flexShrink={0}>
+            {drawMascot(mood)}
+          </Box>
+        )}
       </Box>
     )
   })
