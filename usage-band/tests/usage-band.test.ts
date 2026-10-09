@@ -252,3 +252,62 @@ test('coupe un nom de projet trop long', async ($, on) => {
 
   expect(await shown($)).toContain('un-nom-de-projet-vraiment-bea… · main')
 })
+
+const CLICK = { type: 'down', x: 1, y: 0, button: 'left', in: 'pixel-touch' } as const
+
+async function mountDesktop($: Engine) {
+  return $.ui.mount({ plugin: 'usage-band', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+}
+
+async function pixelLabel(band: Awaited<ReturnType<typeof mountDesktop>>): Promise<string | undefined> {
+  const svgs = await band.findAll({ type: 'Svg' })
+  const pixel = svgs.find(found => String(found.props.alt).startsWith('Mascotte'))
+
+  return pixel === undefined ? undefined : String(pixel.props.alt)
+}
+
+test('cliquer sur Pixel le fait réagir, à tour de rôle', async ($, on) => {
+  const clock = world(on)
+  await measure($)
+  const band = await mountDesktop($)
+
+  const seen: Array<string | undefined> = []
+  for (let i = 0; i < 4; i += 1) {
+    await band.pointer(CLICK)
+    seen.push(await pixelLabel(band))
+    await clock.advance(1000)
+  }
+
+  expect(seen).toEqual([
+    'Mascotte : rigole',
+    'Mascotte : saute de joie',
+    'Mascotte : est surpris',
+    'Mascotte : est content',
+  ])
+
+  await clock.advance(3000)
+  expect(await pixelLabel(band)).toBe('Mascotte : au repos')
+})
+
+test('Pixel a la tête qui tourne si on clique 5 fois de suite', async ($, on) => {
+  world(on)
+  await measure($)
+  const band = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+
+  for (let i = 0; i < 5; i += 1) await band.pointer(CLICK)
+
+  const text = (await band.findAll({ type: 'Text' })).map(found => found.text).join('')
+  expect(text).toContain('(@_@)')
+})
+
+test('Pixel fait coucou quand la souris passe dessus', async ($, on) => {
+  world(on)
+  await measure($)
+  const band = await mountDesktop($)
+
+  await band.pointer({ type: 'enter', x: 0, y: 0, in: 'pixel-touch' })
+  expect(await pixelLabel(band)).toBe('Mascotte : te fait coucou')
+
+  await band.pointer({ type: 'leave', x: 0, y: 0, in: 'pixel-touch' })
+  expect(await pixelLabel(band)).toBe('Mascotte : au repos')
+})

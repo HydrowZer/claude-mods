@@ -38,11 +38,22 @@ export type Mood =
   | 'sleep'
   | 'party'
   | 'love'
+  | 'hello'
+  | 'giggle'
+  | 'boing'
+  | 'surprise'
+  | 'dizzy'
 
 export type Mascot = {
   running: { [toolUseId: string]: Mood }
   flash: { mood: Mood; until: number } | null
   lastActivity: number | null
+  /** Jusqu'à quand la souris est sur Pixel (null quand elle en est sortie). */
+  hoverUntil: number | null
+  /** Heures des derniers clics, pour repérer quand on l'embête. */
+  pokes: number[]
+  /** Nombre de clics, pour varier ses réactions. */
+  pokeCount: number
 }
 
 export type InfoKey =

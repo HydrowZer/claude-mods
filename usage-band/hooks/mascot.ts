@@ -3,8 +3,8 @@ import type { Mood } from '../types'
 // Pixel, la mascotte du bandeau : un SVG animé dans l'app desktop, un petit
 // visage en texte dans le terminal.
 
-type Face = 'normal' | 'up' | 'focus' | 'left' | 'happy' | 'x' | 'worried' | 'closed'
-type Look = { label: string; kao: string; anim: string; face: Face; mouth?: 'smile' | 'o' }
+type Face = 'normal' | 'up' | 'focus' | 'left' | 'happy' | 'x' | 'worried' | 'closed' | 'wide' | 'spiral'
+type Look = { label: string; kao: string; anim: string; face: Face; mouth?: 'smile' | 'o' | 'open' }
 
 export const MOODS: Record<Mood, Look> = {
   idle: { label: 'au repos', kao: '(•ᴗ•)', anim: 'bob', face: 'normal' },
@@ -20,6 +20,11 @@ export const MOODS: Record<Mood, Look> = {
   sleep: { label: 'dort', kao: '(-_-) zᶻ', anim: 'breathe', face: 'closed' },
   party: { label: 'fait la fête', kao: '\\(^o^)/', anim: 'jump', face: 'happy', mouth: 'smile' },
   love: { label: 'est content', kao: '(♥ᴗ♥)', anim: 'bob', face: 'happy', mouth: 'smile' },
+  hello: { label: 'te fait coucou', kao: '(•ᴗ•)/', anim: 'bob', face: 'normal', mouth: 'smile' },
+  giggle: { label: 'rigole', kao: '(^ᴗ^)♪', anim: 'giggle', face: 'happy', mouth: 'open' },
+  boing: { label: 'saute de joie', kao: '\\(•ᴗ•)/', anim: 'boing', face: 'happy', mouth: 'smile' },
+  surprise: { label: 'est surpris', kao: '(°o°)!', anim: 'bob', face: 'wide', mouth: 'o' },
+  dizzy: { label: 'a la tête qui tourne', kao: '(@_@)', anim: 'sway', face: 'spiral' },
 }
 
 export const MASCOT_WIDTH = 64
@@ -38,12 +43,20 @@ const EYES: Array<[number, number]> = [
 const EYE_W = 4
 const EYE_H = 6
 
-const PIXEL =
-  `<rect x="28" y="8" width="32" height="20" fill="${BODY}"/>` +
-  `<rect x="24" y="14" width="4" height="6" fill="${BODY}"/>` +
-  `<rect x="60" y="14" width="4" height="6" fill="${BODY}"/>` +
-  `<g fill="${SHADE}"><rect x="32" y="28" width="4" height="7"/><rect x="38" y="28" width="4" height="7"/>` +
-  `<rect x="46" y="28" width="4" height="7"/><rect x="52" y="28" width="4" height="7"/></g>`
+const RIGHT_ARM = `<rect x="60" y="14" width="4" height="6" fill="${BODY}"/>`
+const WAVING_ARM = `<g class="wave"><rect x="60" y="6" width="4" height="10" fill="${BODY}"/></g>`
+
+function pixel(isWaving = false): string {
+  return (
+    `<rect x="28" y="8" width="32" height="20" fill="${BODY}"/>` +
+    `<rect x="24" y="14" width="4" height="6" fill="${BODY}"/>` +
+    (isWaving ? WAVING_ARM : RIGHT_ARM) +
+    `<g fill="${SHADE}"><rect x="32" y="28" width="4" height="7"/><rect x="38" y="28" width="4" height="7"/>` +
+    `<rect x="46" y="28" width="4" height="7"/><rect x="52" y="28" width="4" height="7"/></g>`
+  )
+}
+
+const PIXEL = pixel()
 
 const CSS = [
   '.bob{animation:bob 2.6s ease-in-out infinite}',
@@ -60,6 +73,12 @@ const CSS = [
   '.zz{animation:zz 3s ease-in infinite}',
   '.fall{animation:fall 1.6s linear infinite}',
   '.rise{animation:rise 2s ease-out infinite}',
+  '.giggle{animation:shake .18s linear infinite}',
+  '.boing{animation:boing .55s cubic-bezier(.3,0,.5,1) infinite;transform-box:fill-box;transform-origin:bottom}',
+  '.sway{animation:sway 1.2s ease-in-out infinite;transform-box:fill-box;transform-origin:bottom}',
+  '.wave{animation:wave .5s ease-in-out infinite alternate;transform-box:fill-box;transform-origin:50% 100%}',
+  '.orbit{animation:orbit 1.2s linear infinite;transform-box:view-box;transform-origin:44px 4px}',
+  '.whirl{animation:whirl .9s linear infinite;transform-box:fill-box;transform-origin:center}',
   '@keyframes bob{50%{transform:translateY(-1.5px)}}',
   '@keyframes jump{50%{transform:translateY(-4px)}}',
   '@keyframes shake{25%{transform:translateX(-1.2px)}75%{transform:translateX(1.2px)}}',
@@ -73,6 +92,11 @@ const CSS = [
   '@keyframes zz{0%{transform:translate(0,4px);opacity:0}30%{opacity:1}100%{transform:translate(-5px,-9px);opacity:0}}',
   '@keyframes fall{0%{transform:translateY(-6px);opacity:0}15%{opacity:1}100%{transform:translateY(34px);opacity:0}}',
   '@keyframes rise{0%{transform:translateY(6px);opacity:0}30%{opacity:1}100%{transform:translateY(-12px);opacity:0}}',
+  '@keyframes boing{0%,100%{transform:translateY(0) scaleY(1)}15%{transform:translateY(0) scaleY(.85)}50%{transform:translateY(-7px) scaleY(1.05)}}',
+  '@keyframes sway{25%{transform:rotate(-6deg)}75%{transform:rotate(6deg)}}',
+  '@keyframes wave{from{transform:rotate(-18deg)}to{transform:rotate(18deg)}}',
+  '@keyframes orbit{to{transform:rotate(360deg)}}',
+  '@keyframes whirl{to{transform:rotate(360deg)}}',
   '@media (prefers-reduced-motion:reduce){*{animation:none!important}}',
 ].join('')
 
@@ -88,6 +112,16 @@ function eyes(face: Face): string {
     }
     if (face === 'x') {
       return `<g stroke="${INK}" stroke-width="1.5" stroke-linecap="round"><line x1="${x - 0.5}" y1="${y}" x2="${x + EYE_W + 0.5}" y2="${y + EYE_H - 1}"/><line x1="${x + EYE_W + 0.5}" y1="${y}" x2="${x - 0.5}" y2="${y + EYE_H - 1}"/></g>`
+    }
+
+    if (face === 'wide') {
+      return `<rect x="${x - 1}" y="${y - 1.5}" width="${EYE_W + 2}" height="${EYE_H + 2}" fill="${INK}"/><rect x="${x}" y="${y - 0.5}" width="1.6" height="1.6" fill="${PAPER}"/>`
+    }
+    if (face === 'spiral') {
+      const cx = x + EYE_W / 2
+      const cy = y + EYE_H / 2
+
+      return `<g class="whirl"><circle cx="${cx}" cy="${cy}" r="3.2" fill="none" stroke="${INK}" stroke-width="1.2" stroke-dasharray="14 6"/><circle cx="${cx}" cy="${cy}" r="1.2" fill="${INK}"/></g>`
     }
 
     const dx = face === 'left' || face === 'focus' ? -1.5 : 0
@@ -106,6 +140,7 @@ function eyes(face: Face): string {
 function mouth(kind: Look['mouth']): string {
   if (kind === 'smile') return `<path d="M41 23 q3 3 6 0" fill="none" stroke="${INK}" stroke-width="1.5" stroke-linecap="round"/>`
   if (kind === 'o') return `<ellipse cx="44" cy="24" rx="1.6" ry="2" fill="${INK}"/>`
+  if (kind === 'open') return `<path d="M40.5 22 h7 q0 4.5 -3.5 4.5 q-3.5 0 -3.5 -4.5 Z" fill="${INK}"/>`
 
   return ''
 }
@@ -188,6 +223,22 @@ function prop(mood: Mood): string {
         `<path class="rise" d="M12 24 C4 18 6 11 12 15 C18 11 20 18 12 24 Z" fill="#f472b6"/>` +
         `<path class="rise" style="animation-delay:1s" d="M5 16 C1 13 2 9 5 11 C8 9 9 13 5 16 Z" fill="#f472b6"/>`
       )
+    case 'giggle':
+      return [
+        [8, 18, 0],
+        [16, 12, 0.7],
+      ]
+        .map(
+          ([x, y, delay]) =>
+            `<text class="rise" style="animation-delay:${delay}s" x="${x}" y="${y}" font-family="system-ui,sans-serif" font-size="11" font-weight="700" fill="#facc15">♪</text>`,
+        )
+        .join('')
+    case 'boing':
+      return sparkle(8, 30, 0) + sparkle(16, 8, 0.3) + sparkle(4, 16, 0.6)
+    case 'surprise':
+      return `<circle cx="13" cy="15" r="7" fill="#facc15"/><rect x="11.9" y="10" width="2.2" height="6.5" rx="1" fill="${INK}"/><circle cx="13" cy="19.3" r="1.3" fill="${INK}"/>`
+    case 'dizzy':
+      return `<g class="orbit">${sparkle(36, 4, 0)}${sparkle(52, 4, 0.5)}</g>`
     default:
       return ''
   }
@@ -209,7 +260,7 @@ export function mascotSvg(mood: Mood): string {
     `<svg xmlns="http://www.w3.org/2000/svg" width="${MASCOT_WIDTH}" height="${MASCOT_HEIGHT}" viewBox="0 0 ${MASCOT_WIDTH} ${MASCOT_HEIGHT}">` +
     `<title>Pixel ${look.label}</title><style>${CSS}</style>` +
     prop(mood) +
-    `<g class="${look.anim}">${PIXEL}${face}${blush(mood)}${mouth(look.mouth)}</g>` +
+    `<g class="${look.anim}">${pixel(mood === 'hello')}${face}${blush(mood)}${mouth(look.mouth)}</g>` +
     '</svg>'
   )
 }

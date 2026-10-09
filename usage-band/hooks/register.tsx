@@ -74,8 +74,18 @@ const SETTINGS = {
     sleepAfterMinutes: 10,
     /** Pixel s'inquiète sous ce % de contexte libre (et dès qu'une limite passe `alertAt`). */
     alertContextFree: 15,
+    /** Durée d'une réaction quand on clique sur Pixel, en secondes. */
+    pokeSeconds: 2.5,
+    /** Au bout de tant de clics en 3 secondes, Pixel a la tête qui tourne. */
+    dizzyAfterClicks: 5,
   },
 }
+
+/** Ce que fait Pixel quand on clique dessus, à tour de rôle. */
+const POKE_MOODS: Mood[] = ['giggle', 'boing', 'surprise', 'love']
+
+/** La zone tactile posée sur Pixel. */
+const TOUCH_KEY = 'pixel-touch'
 
 /** Ce que fait Pixel pendant chaque outil ; les autres le font réfléchir. */
 const TOOL_MOODS: Record<string, Mood> = {
@@ -126,6 +136,9 @@ const mascot = atom({ plugin: 'usage-band', key: 'mascot' } as const, {
   running: {},
   flash: null,
   lastActivity: null,
+  hoverUntil: null,
+  pokes: [],
+  pokeCount: 0,
 })
 const tick = atom({ plugin: 'usage-band', key: 'tick' } as const, 0)
 
@@ -360,6 +373,7 @@ function moodFor(m: Mascot, isWorking: boolean, u: Usage | null, now: number): M
   const tool = running[running.length - 1]
   if (tool) return tool
   if (m.flash && m.flash.until > now) return m.flash.mood
+  if (m.hoverUntil != null && m.hoverUntil > now) return 'hello'
   if (isWorking) return 'think'
 
   const { alertContextFree, sleepAfterMinutes } = SETTINGS.mascot
@@ -378,11 +392,32 @@ async function touch($: EngineInterface, change: (m: Mascot) => Mascot = m => m)
   await update($, mascot, (m): Mascot => ({ ...change(m), lastActivity: now }))
 }
 
-async function flash($: EngineInterface, mood: Mood): Promise<void> {
+async function flash(
+  $: EngineInterface,
+  mood: Mood,
+  seconds = SETTINGS.mascot.flashSeconds,
+  change: (m: Mascot) => Mascot = m => m,
+): Promise<void> {
   const now = await $.clock.now()
-  const ms = SETTINGS.mascot.flashSeconds * 1000
-  await update($, mascot, (m): Mascot => ({ ...m, flash: { mood, until: now + ms }, lastActivity: now }))
+  const ms = seconds * 1000
+  await update($, mascot, (m): Mascot => ({ ...change(m), flash: { mood, until: now + ms }, lastActivity: now }))
   $.clock.after(ms + 50, () => void update($, tick, n => n + 1))
+}
+
+async function poke($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  const m = await read($, mascot)
+  const recent = [...(m.pokes ?? []).filter(at => now - at < 3000), now]
+  const count = m.pokeCount ?? 0
+
+  if (recent.length >= SETTINGS.mascot.dizzyAfterClicks) {
+    await flash($, 'dizzy', 3, state => ({ ...state, pokes: [], pokeCount: count + 1 }))
+
+    return
+  }
+
+  const mood = POKE_MOODS[count % POKE_MOODS.length] ?? 'giggle'
+  await flash($, mood, SETTINGS.mascot.pokeSeconds, state => ({ ...state, pokes: recent, pokeCount: count + 1 }))
 }
 
 function topChunks(
@@ -579,6 +614,23 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
+  on('ui.message', async ($, e, next) => {
+    if (e.element !== TOUCH_KEY) return next(e)
+
+    const kind = typeof e.data === 'object' && e.data !== null ? (e.data as { kind?: unknown }).kind : undefined
+    if (kind === 'poke') {
+      await poke($)
+    } else if (kind === 'enter') {
+      const now = await $.clock.now()
+      await update($, mascot, (m): Mascot => ({ ...m, hoverUntil: now + 30_000, lastActivity: now }))
+      $.clock.after(30_050, () => void update($, tick, n => n + 1))
+    } else if (kind === 'leave') {
+      await update($, mascot, (m): Mascot => ({ ...m, hoverUntil: null }))
+    }
+
+    return {}
+  })
+
   on('command.run', { command: 'bandeau' }, async ($, e) => {
     const [verb, ...rest] = normalize(e.args).split(/\s+/).filter(Boolean)
     const current = await read($, prefs)
@@ -645,6 +697,7 @@ export const register: Register = on => {
     const ui = $.ui.resolve(e)
     const { Box, Text } = ui
     const Svg = e.surface === 'desktop' && 'Svg' in ui ? ui.Svg : undefined
+    const Client = 'Client' in ui ? ui.Client : undefined
     const { width, height, gap } = SETTINGS.segment
     const meterWidth = SETTINGS.segments * width + (SETTINGS.segments - 1) * gap
     const empty = SETTINGS.segments
@@ -714,6 +767,11 @@ export const register: Register = on => {
         {mood !== null && (
           <Box key="mascotte" flexShrink={0}>
             {drawMascot(mood)}
+            {Client && (
+              <Box position="absolute" top={0} left={0} right={0} bottom={0}>
+                <Client key={TOUCH_KEY} module="./touch.ts" width="100%" height="100%" />
+              </Box>
+            )}
           </Box>
         )}
       </Box>
