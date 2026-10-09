@@ -24,6 +24,17 @@ Dans Claude Code :
 
 Puis ouvre une nouvelle session.
 
+### Mettre à jour
+
+Le plugin installé est une copie : il ne suit pas le dépôt tout seul. Pour récupérer la dernière version :
+
+```
+claude plugin marketplace update claude-mods
+claude plugin update usage-band@claude-mods
+```
+
+Puis `/reload-plugins` dans ta session, ou ouvre-en une nouvelle.
+
 ### Utilisation
 
 | Commande | Effet |
