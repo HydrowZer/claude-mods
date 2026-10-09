@@ -684,3 +684,70 @@ test('les onglets n\'affichent qu\'une partie des réglages à la fois', async (
   expect(await pane.find({ key: 'alertLimitAt' })).toBeDefined()
   expect(await pane.find({ key: 'shape' })).toBeUndefined()
 })
+
+test('une boucle reste affichée quand la fin de tour ne donne pas la liste', async ($, on) => {
+  world(on)
+  tools(on)
+  on('classic.Stop', () => ({}))
+  await measure($)
+
+  await $.tool.call({ tool: 'CronCreate', cron: '*/5 * * * *', prompt: '/babysit-prs', recurring: true })
+  await $.classic.Stop({ stop_hook_active: false })
+
+  expect(await shown($)).toContain('⟳/babysit-prs')
+})
+
+test('une boucle s\'affiche même sans identifiant ni heure dans le résultat', async ($, on) => {
+  world(on)
+  on('tool.call', () => ({ result: null, text: 'ok' }))
+  on('classic.Stop', () => ({}))
+  await measure($)
+
+  await $.tool.call({ tool: 'CronCreate', cron: '*/10 * * * *', prompt: 'vérifie la CI', recurring: true })
+  await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 600, reason: 'attend le build', prompt: '/loop vérifie' })
+  const text = await shown($)
+
+  expect(text).toContain('⟳vérifie la CItoutes les 10 min')
+  expect(text).toContain('◷vérifiedans 10 min· attend le build')
+})
+
+test('la fin de tour garde une boucle reconnue à son contenu', async ($, on) => {
+  const clock = world(on)
+  on('tool.call', () => ({ result: null, text: 'ok' }))
+  on('classic.Stop', () => ({}))
+  const toasts: string[] = []
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  await measure($)
+
+  await $.tool.call({ tool: 'CronCreate', cron: '*/5 * * * *', prompt: '/babysit-prs', recurring: true })
+  await $.classic.Stop({
+    stop_hook_active: false,
+    session_crons: [{ id: 'vrai-id', schedule: '*/5 * * * *', recurring: true, prompt: '/babysit-prs' }],
+  })
+  await clock.advance(1)
+
+  expect(await shown($)).toContain('⟳/babysit-prs')
+  expect(toasts).toEqual([])
+})
+
+test('arrêter une boucle dynamique retire aussi son réveil programmé', async ($, on) => {
+  world(on)
+  tools(on)
+  on('classic.Stop', () => ({}))
+  await measure($)
+
+  await $.tool.call({ tool: 'ScheduleWakeup', delaySeconds: 600, reason: 'test', prompt: '/loop salut' })
+  await $.classic.Stop({
+    stop_hook_active: false,
+    session_crons: [{ id: '0e2a6eb1', schedule: '12 12 * * *', recurring: false, prompt: '/loop salut' }],
+  })
+  expect(await shown($)).toContain('◷salut')
+
+  await $.tool.call({ tool: 'ScheduleWakeup', stop: true })
+  const text = await shown($)
+  expect(text).not.toContain('◷')
+  expect(text).not.toContain('rappel')
+})

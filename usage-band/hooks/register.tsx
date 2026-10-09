@@ -734,22 +734,39 @@ async function refresh($: EngineInterface): Promise<void> {
 
 type Call = { tool: string } & Record<string, unknown>
 
+const SCHEDULE_TOOLS = new Set(['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TodoWrite'])
+
+let diagnostics: Array<{ quand: string; quoi: string; donnees: unknown }> = []
+
+/** Avec `/bandeau diagnostic`, note ce que Claude Code transmet, dans diagnostic.json à côté du mod. */
+async function diagnose($: EngineInterface, quoi: string, donnees: unknown): Promise<void> {
+  try {
+    if ((await read($, prefs)).diagnostic !== true) return
+    const quand = new Date(await $.clock.now()).toISOString()
+    diagnostics = [...diagnostics, { quand, quoi, donnees }].slice(-40)
+    await $.fs.write(`${$.plugin.root}/diagnostic.json`, JSON.stringify(diagnostics, null, 2))
+  } catch {
+    // Le diagnostic ne doit jamais gêner le bandeau.
+  }
+}
+
 const asString = (value: unknown): string | null => (typeof value === 'string' ? value : null)
 const isStatus = (value: unknown): value is TaskItem['status'] =>
   value === 'pending' || value === 'in_progress' || value === 'completed'
 
 /** Ce qu'un appel d'outil réussi change aux boucles, au réveil et aux tâches. */
-function scheduleAfter(s: Schedule, e: Call, result: unknown): Schedule {
+function scheduleAfter(s: Schedule, e: Call, result: unknown, now: number): Schedule {
   const r = (typeof result === 'object' && result !== null ? result : {}) as Record<string, unknown>
 
   switch (e.tool) {
     case 'CronCreate': {
-      const id = asString(r.id)
       const cron = asString(e.cron)
-      if (id === null || cron === null) return s
-      const job: CronJob = { id, cron, prompt: asString(e.prompt) ?? '', recurring: e.recurring !== false }
+      if (cron === null) return s
+      const prompt = asString(e.prompt) ?? ''
+      const id = asString(r.id) ?? `nouvelle-${asString(e.tool_use_id) ?? `${cron}|${prompt}`}`
+      const job: CronJob = { id, cron, prompt, recurring: e.recurring !== false }
 
-      return { ...s, crons: [...s.crons.filter(c => c.id !== id), job] }
+      return { ...s, crons: [...(s.crons ?? []).filter(c => c.id !== id && !(c.cron === cron && c.prompt === prompt)), job] }
     }
     case 'CronDelete':
       return { ...s, crons: s.crons.filter(c => c.id !== e.id) }
@@ -765,8 +782,16 @@ function scheduleAfter(s: Schedule, e: Call, result: unknown): Schedule {
       return { ...s, crons }
     }
     case 'ScheduleWakeup': {
-      const at = typeof r.scheduledFor === 'number' ? r.scheduledFor : null
-      if (e.stop === true || r.stopped === true || at === null) return { ...s, wakeup: null }
+      if (e.stop === true || r.stopped === true) {
+        // Le réveil annulé figure aussi parmi les tâches programmées : on le retire avec lui.
+        const prompt = s.wakeup?.prompt
+        const crons = (s.crons ?? []).filter(job => job.recurring || (prompt != null && job.prompt !== prompt))
+
+        return { ...s, wakeup: null, crons }
+      }
+      const delay = typeof e.delaySeconds === 'number' ? Math.min(3600, Math.max(60, e.delaySeconds)) : null
+      const at = typeof r.scheduledFor === 'number' ? r.scheduledFor : delay === null ? null : now + delay * 1000
+      if (at === null) return s
 
       return { ...s, wakeup: { at, reason: asString(e.reason), prompt: asString(e.prompt) } }
     }
@@ -1028,7 +1053,7 @@ function scheduleChunks(show: Record<InfoKey, boolean>, s: Schedule, now: number
       out.push({ key: `cron-${job.id}`, gap: 1, full: parts, short: parts.filter((_, i) => i !== 2), block: 'boucles' })
     }
 
-    const wakeup = s.wakeup
+    const wakeup = s.wakeup && s.wakeup.at > now - 2 * 60_000 ? s.wakeup : null
     if (wakeup) {
       const parts: Part[] = [
         { text: '◷', color: colors.loop },
@@ -1269,6 +1294,7 @@ export const register: Register = on => {
     await (isThanks ? flash($, 'love') : touch($))
 
     if (e.origin.kind === 'scheduled-trigger') {
+      await diagnose($, 'déclenchement programmé', { texte: e.text })
       const now = await $.clock.now()
       const prompt = e.text
       await update($, schedule, (s): Schedule => ({
@@ -1298,24 +1324,46 @@ export const register: Register = on => {
 
   on('classic.Stop', async ($, e, next) => {
     const done = await next(e)
-    const crons = e.session_crons ?? []
-    const running = (e.background_tasks ?? []).filter(task => task.status === 'running' || task.status === 'pending')
+    const now = await $.clock.now()
+    await diagnose($, 'fin de tour', { session_crons: e.session_crons, background_tasks: e.background_tasks })
 
+    const crons = Array.isArray(e.session_crons) ? e.session_crons : null
+    const background = Array.isArray(e.background_tasks) ? e.background_tasks : null
     const before = await read($, schedule)
-    for (const job of before.crons ?? []) {
-      if (job.recurring && !crons.some(kept => kept.id === job.id)) loopEnded($, before, job.prompt)
+    const matches = (job: CronJob, kept: { id: string; schedule: string; prompt: string }) =>
+      kept.id === job.id || (kept.schedule === job.cron && kept.prompt === job.prompt)
+
+    if (crons) {
+      for (const job of before.crons ?? []) {
+        if (job.recurring && !crons.some(kept => matches(job, kept))) loopEnded($, before, job.prompt)
+      }
     }
 
     await update($, schedule, (s): Schedule => {
-      const known = new Map((s.crons ?? []).map(job => [job.id, job]))
+      const known = s.crons ?? []
+      const synced =
+        crons === null
+          ? known
+          : crons.map(
+              (kept): CronJob =>
+                known.find(job => matches(job, kept)) ?? { id: kept.id, cron: kept.schedule, prompt: kept.prompt, recurring: kept.recurring },
+            )
+      const isStale = s.wakeup !== null && s.wakeup.at < now - 2 * 60_000
 
       return {
         ...s,
-        crons: crons.map(
-          (job): CronJob => known.get(job.id) ?? { id: job.id, cron: job.schedule, prompt: job.prompt, recurring: job.recurring },
-        ),
-        wakeup: crons.some(job => !job.recurring) ? s.wakeup : null,
-        background: running.map(task => ({ type: task.type, description: task.description })),
+        crons: synced.map(job => {
+          const kept = crons?.find(c => matches(job, c))
+
+          return kept ? { ...job, id: kept.id } : job
+        }),
+        wakeup: isStale ? null : s.wakeup,
+        background:
+          background === null
+            ? s.background
+            : background
+                .filter(task => task.status === 'running' || task.status === 'pending')
+                .map(task => ({ type: task.type, description: task.description })),
       }
     })
 
@@ -1349,7 +1397,9 @@ export const register: Register = on => {
       const call = e as unknown as Call
       const result = (ran as { result?: unknown }).result
       const before = await read($, schedule)
-      await update($, schedule, (s): Schedule => scheduleAfter(s, call, result))
+      const now = await $.clock.now()
+      if (SCHEDULE_TOOLS.has(e.tool)) await diagnose($, `outil ${e.tool}`, { entree: call, resultat: result, texte: ran.text })
+      await update($, schedule, (s): Schedule => scheduleAfter(s, call, result, now))
       const after = await read($, schedule)
 
       for (const job of before.crons ?? []) {
@@ -1408,6 +1458,16 @@ export const register: Register = on => {
     }
     if (verb === 'aide') {
       return { text: describe(current) }
+    }
+    if (verb === 'diagnostic') {
+      const isOn = current.diagnostic !== true
+      await save({ ...current, diagnostic: isOn })
+
+      return {
+        text: isOn
+          ? `Diagnostic activé : lance une /loop, puis regarde ${$.plugin.root}/diagnostic.json. /bandeau diagnostic pour l'arrêter.`
+          : 'Diagnostic arrêté.',
+      }
     }
     if (verb === 'reset' || verb === 'defaut') {
       await save({ isHidden: false, overrides: {}, style: {} })

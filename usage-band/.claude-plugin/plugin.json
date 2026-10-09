@@ -1,6 +1,6 @@
 {
   "name": "usage-band",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Bandeau au-dessus du prompt : modèle, projet, état git, coût, contexte, limites, boucles et tâches en cours, avec Pixel, une mascotte qui réagit, et un panneau de réglages en direct",
   "types": "./types/index.d.ts",
   "author": {

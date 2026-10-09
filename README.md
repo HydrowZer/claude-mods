@@ -34,7 +34,7 @@ claude plugin marketplace update claude-mods
 claude plugin update usage-band@claude-mods
 ```
 
-Puis `/reload-plugins` dans ta session, ou ouvre-en une nouvelle.
+Puis `/reload-plugins` dans ta session, ou ouvre-en une nouvelle. Chaque conversation charge le mod à son démarrage : une conversation déjà ouverte garde l'ancienne version tant qu'on n'y tape pas `/reload-plugins`.
 
 ### Utilisation
 
@@ -46,6 +46,7 @@ Puis `/reload-plugins` dans ta session, ou ouvre-en une nouvelle.
 | `/bandeau masquer cout outils` | Cache une ou plusieurs infos |
 | `/bandeau afficher etat` | Remet une info (ici l'indicateur « ● en cours ») |
 | `/bandeau reset` | Revient aux réglages par défaut |
+| `/bandeau diagnostic` | Note dans `usage-band/diagnostic.json` ce que Claude Code transmet pour les boucles (pour enquêter si elles ne s'affichent pas) |
 
 Infos possibles : `modele`, `projet`, `branche`, `git`, `duree`, `cout`, `outils`, `fichiers`, `etat`, `contexte`, `limites`, `reset`, `boucles`, `taches`, `arriereplan`, `mascotte`. Les choix sont gardés d'une session à l'autre.
 

@@ -154,6 +154,8 @@ export type Prefs = {
   style?: StyleOverrides
   /** Les lignes du bandeau, chacune avec ses blocs dans l'ordre ; un bloc absent est masqué. */
   layout?: BlockId[][]
+  /** `/bandeau diagnostic` : note ce que Claude Code transmet pour les boucles. */
+  diagnostic?: boolean
 }
 
 declare module 'claude-code' {
